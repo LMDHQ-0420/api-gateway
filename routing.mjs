@@ -32,6 +32,10 @@ export function prepareProviders(definitions) {
     }
     const validPath = path => typeof path === 'string' && /^\/(?!\/)[^?#\\]*$/.test(path) && !path.endsWith('/') && !path.split('/').some(part => part === '.' || part === '..');
     if (!validPath(basePath)) throw new Error(`厂商 ${id} 的 basePath 配置无效`);
+    const modelsPath = definition.modelsPath ?? `${basePath}/models`;
+    if (typeof modelsPath !== 'string' || !modelsPath.startsWith('/') || modelsPath.startsWith('//') || /[#\\\r\n]/.test(modelsPath)) {
+      throw new Error(`厂商 ${id} 的 modelsPath 必须是官方模型列表的绝对路径`);
+    }
     const nativePrefixes = strings(definition.nativePrefixes ?? [], 'nativePrefixes');
     if (!nativePrefixes.every(validPath)) throw new Error(`厂商 ${id} 的 nativePrefixes 配置无效`);
     const headers = definition.headers ?? {};
@@ -46,7 +50,7 @@ export function prepareProviders(definitions) {
     if (!Array.isArray(retryStatuses) || retryStatuses.some(status => !Number.isInteger(status) || status < 400 || status > 599)) {
       throw new Error(`厂商 ${id} 的 retryStatuses 必须是 HTTP 错误状态码数组`);
     }
-    return { ...definition, id, origin, basePath, auth, enabled, headers, nativePrefixes, retryStatuses,
+    return { ...definition, id, origin, basePath, auth, enabled, headers, nativePrefixes, retryStatuses, modelsPath,
       models: strings(definition.models ?? [], 'models'),
       modelPrefixes: strings(definition.modelPrefixes ?? [], 'modelPrefixes'),
     };
@@ -92,6 +96,8 @@ function modelProvider(model, providers) {
   const name = model.toLowerCase();
   const exact = providers.filter(provider => provider.models.some(item => item.toLowerCase() === name));
   if (exact.length) return selectUnique(exact, 'ambiguous_model');
+  const discovered = providers.filter(provider => provider.discoveredModels?.has(name));
+  if (discovered.length) return selectUnique(discovered, 'ambiguous_model');
   const matches = providers.flatMap(provider => provider.modelPrefixes
     .filter(prefix => name.startsWith(prefix.toLowerCase()))
     .map(prefix => ({ provider, length: prefix.length })));

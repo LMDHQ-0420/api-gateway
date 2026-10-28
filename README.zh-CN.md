@@ -9,6 +9,7 @@
 
 - 内置 GLM、Qwen、Kimi、DeepSeek、MiniMax、OpenAI、Claude、Gemini、豆包和阶跃星辰路由。
 - 各厂商独立按队列切换，重试有界，不做负载均衡或跨厂商兜底。
+- 实时查询已配置官方 API 的模型列表，单独报告查询失败的厂商。
 - 保留原始请求体、模型名、工具调用和 SSE 响应字节。
 - 标准 SDK 和 HTTP 客户端修改基础 URL 即可接入。
 - 仅使用 Node.js 内置模块，无第三方运行依赖。
@@ -47,12 +48,16 @@ curl http://127.0.0.1:3000/v1/chat/completions \
 | 接口 | 行为 |
 | --- | --- |
 | `/v1/chat/completions` | 根据 `model` 分流并映射官方基础路径 |
-| `/v1/models` | 列出已启用且加载 key 的厂商在配置中声明的模型 |
+| `/v1/models` | 实时查询已启用且加载 key 的官方模型列表 |
 | `/api/paas/v4/...` | 保留 GLM 官方路径 |
 | `/api/coding/paas/v4/...` | 保留 GLM Coding Plan 路径 |
 | `/providers/<id>/<官方路径>` | 显式选择厂商，适用于不带 `model` 的接口 |
 
-例如 `/providers/kimi/v1/files` 转发到 Kimi 的 `/v1/files`。模型列表来自本地配置，不代表实时权限或可用性检查。
+例如 `/providers/kimi/v1/files` 转发到 Kimi 的 `/v1/files`。
+
+`GET /v1/models` 每次并行查询官方接口，去重后返回 OpenAI 风格的列表，`owned_by` 标识来源厂商。失败或不支持列表接口的厂商不进入 `data`，会在可选的 `errors` 数组中说明；全部查询失败时返回 `429` 或 `503`。不会用配置中的示例模型补充结果。新发现的模型 ID 会自动注册路由，无需已有前缀。
+
+查询列表与模型调用共用各厂商的 key 队列。列表查询成功不代表每个模型当前都有额度或调用权限；厂商专属列表 URL 仍原样返回官方响应。
 
 **请求协议保持官方格式。** Claude 使用 `/v1/messages` 和官方 Messages 请求体；Gemini 使用其官方 OpenAI 兼容接口。网关不转换 Chat Completions、Messages 等协议。
 
@@ -78,11 +83,12 @@ HTTP `401`、`402`、`403`、`408`、`429`、`5xx`，以及连接失败和超时
 | `PROVIDERS_FILE` | `providers.json` |
 | `GATEWAY_TOKEN` | 空，可选网关访问口令 |
 | `UPSTREAM_TIMEOUT_MS` | `120000`，每次等待上游数据的超时毫秒数 |
+| `MODELS_TIMEOUT_MS` | `10000`，每个厂商查询列表的总超时毫秒数 |
 | `MAX_BODY_BYTES` | `33554432`，即 32 MiB |
 
-编辑 [providers.json](providers.json) 调整官方地址、地域和模型规则。每个厂商配置包含 `id`、`origin`、`basePath`、`keysFile`、`modelPrefixes` 和 `models`。key 路径相对配置文件解析；模型精确匹配优先，其次取最长前缀，冲突时返回错误。将模型 ID 加入 `models` 可显示在模型列表中，豆包 `ep-...` 接入点 ID 也在此配置。
+编辑 [providers.json](providers.json) 调整官方地址、地域和模型规则。每个厂商配置包含 `id`、`origin`、`basePath`、`keysFile`、`modelPrefixes` 和 `models`。key 路径相对配置文件解析；配置中的精确模型匹配优先，其次是已发现的模型 ID，最后取最长前缀。`models` 用于显式指定模型路由，包括豆包 `ep-...` 接入点 ID，不会直接添加到实时列表。多个厂商返回相同模型 ID 时，依次按显式映射、所属模型前缀、配置顺序选择来源。
 
-其他选项包括 `enabled`、`nativePrefixes`、`auth`（`bearer` 或 `x-api-key`）、默认 `headers` 和 `retryStatuses`。新增厂商条目后运行 `npm run init-keys` 即可创建新池。官方地址需与 key 的地域和套餐匹配；统一入口使用 GLM Coding Plan 时，需相应修改 GLM 的 `basePath`。
+其他选项包括 `modelsPath`（默认 `<basePath>/models`）、`enabled`、`nativePrefixes`、`auth`（`bearer` 或 `x-api-key`）、默认 `headers` 和 `retryStatuses`。新增厂商条目后运行 `npm run init-keys` 即可创建新池。官方地址需与 key 的地域和套餐匹配；统一入口使用 GLM Coding Plan 时，需相应修改 GLM 的 `basePath`。
 
 启用 `GATEWAY_TOKEN` 后，客户端使用 `Authorization: Bearer <口令>` 或 Claude 的 `x-api-key`。key 文件和 `.env` 已加入 Git 忽略规则，自定义 key 文件位置也应加入 `.gitignore`。旧版根目录 `keys.txt` 仅在 GLM 专属文件为空时作为回退。
 

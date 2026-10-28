@@ -9,6 +9,7 @@ A lightweight gateway that routes requests to official model providers. Each pro
 
 - Built-in routing for GLM, Qwen, Kimi, DeepSeek, MiniMax, OpenAI, Claude, Gemini, Doubao and StepFun.
 - Independent, ordered key pools with bounded retries; no load balancing or cross-provider fallback.
+- Live model discovery from configured official APIs, with failed providers reported separately.
 - Original request bodies, model names, tool calls and SSE response bytes preserved.
 - Standard SDKs and HTTP clients supported by changing the base URL.
 - Node.js built-in modules only; no third-party runtime dependencies.
@@ -47,12 +48,16 @@ Change `model` to select another provider. Set `stream: true` for SSE; use `curl
 | Endpoint | Behavior |
 | --- | --- |
 | `/v1/chat/completions` | Route by `model`, map to the provider's official base path |
-| `/v1/models` | List models configured for enabled providers with loaded keys |
+| `/v1/models` | Query official model lists for enabled providers with loaded keys |
 | `/api/paas/v4/...` | Preserve GLM's official path |
 | `/api/coding/paas/v4/...` | Preserve GLM's Coding Plan path |
 | `/providers/<id>/<official-path>` | Select a provider explicitly; useful for requests without `model` |
 
-For example, `/providers/kimi/v1/files` forwards to Kimi's `/v1/files`. The model list comes from local configuration, not a live permission or availability check.
+For example, `/providers/kimi/v1/files` forwards to Kimi's `/v1/files`.
+
+`GET /v1/models` queries official APIs in parallel on every request and returns a deduplicated OpenAI-style list. Each entry's `owned_by` identifies its provider. Failed or unsupported providers are excluded from `data` and reported in an optional `errors` array; if all queries fail, the endpoint returns `429` or `503`. No static example models are substituted. Newly discovered IDs are registered for routing, even without a matching prefix.
+
+Discovery uses the same key queues as inference. A successful catalog request does not guarantee quota or access for every listed model. Provider-specific list URLs still return the original official response.
 
 **Protocols stay provider-native.** Claude uses `/v1/messages` and the official Messages body. Gemini uses its official OpenAI-compatible endpoint. The gateway does not convert Chat Completions, Messages or other protocols.
 
@@ -78,11 +83,12 @@ Copy `.env.example` to `.env` for optional overrides:
 | `PROVIDERS_FILE` | `providers.json` |
 | `GATEWAY_TOKEN` | Empty; optional client access token |
 | `UPSTREAM_TIMEOUT_MS` | `120000` per upstream inactivity interval |
+| `MODELS_TIMEOUT_MS` | `10000` total discovery time per provider |
 | `MAX_BODY_BYTES` | `33554432` (32 MiB) |
 
-Edit [providers.json](providers.json) to change official endpoints, regions or model rules. Each entry defines `id`, `origin`, `basePath`, `keysFile`, `modelPrefixes` and `models`. Key paths are relative to the configuration file. Exact model matches take priority over the longest prefix; ambiguous matches return an error. Add model IDs to `models` to expose them in the model list, including Doubao endpoint IDs such as `ep-...`.
+Edit [providers.json](providers.json) to change official endpoints, regions or model rules. Each entry defines `id`, `origin`, `basePath`, `keysFile`, `modelPrefixes` and `models`. Key paths are relative to the configuration file. Configured exact model matches take priority, followed by discovered IDs, then the longest prefix. Use `models` for explicit routing overrides, including Doubao endpoint IDs such as `ep-...`; this does not add entries to the live catalog. Duplicate discovered IDs prefer an explicit mapping, then the provider's model prefix, then configuration order.
 
-Additional options include `enabled`, `nativePrefixes`, `auth` (`bearer` or `x-api-key`), default `headers` and `retryStatuses`. Add another entry and run `npm run init-keys` to create a new provider pool. Match the official endpoint to your key's region and plan. For GLM Coding Plan on the unified route, change GLM's `basePath` accordingly.
+Additional options include `modelsPath` (defaults to `<basePath>/models`), `enabled`, `nativePrefixes`, `auth` (`bearer` or `x-api-key`), default `headers` and `retryStatuses`. Add another entry and run `npm run init-keys` to create a new provider pool. Match the official endpoint to your key's region and plan. For GLM Coding Plan on the unified route, change GLM's `basePath` accordingly.
 
 With `GATEWAY_TOKEN` enabled, clients use `Authorization: Bearer <token>` or Claude's `x-api-key`. Key files and `.env` are Git-ignored; add custom key-file locations to `.gitignore` too. Legacy root `keys.txt` remains a GLM fallback when its dedicated file is empty.
 

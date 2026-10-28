@@ -182,15 +182,16 @@ test('empty pool and unknown model return errors without contacting a different 
   assert.equal(upstream.calls.length, 0);
 });
 
-test('model list contains configured models only from pools with keys', async t => {
-  const upstream = await mock(t);
+test('model list queries official endpoints only for pools with keys', async t => {
+  const upstream = await mock(t, (_req, res) => res.end(JSON.stringify({ data: [{ id: 'glm-live-model' }] })));
   const url = await gateway(t, [definition('glm', upstream.origin, { models: ['glm-test'] }),
     definition('kimi', upstream.origin, { keys: [], models: ['kimi-test'] })]);
   const response = await fetch(`${url}/v1/models`);
   const body = await response.json();
   assert.equal(body.object, 'list');
-  assert.deepEqual(body.data.map(item => [item.id, item.owned_by]), [['glm-test', 'glm']]);
-  assert.equal(upstream.calls.length, 0);
+  assert.deepEqual(body.data.map(item => [item.id, item.owned_by]), [['glm-live-model', 'glm']]);
+  assert.equal(upstream.calls.length, 1);
+  assert.equal(upstream.calls[0].path, '/v1/models');
 });
 
 test('concurrent mixed-provider requests use each pool head without load balancing', async t => {

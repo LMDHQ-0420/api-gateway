@@ -3,6 +3,7 @@ import https from 'node:https';
 import { timingSafeEqual } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { pipeline } from 'node:stream';
+import { discoverModels } from './models.mjs';
 import { loadProviderDefinitions, prepareProviders, routeRequest, RoutingError } from './routing.mjs';
 
 const HOP_HEADERS = new Set([
@@ -93,7 +94,7 @@ function sendUpstream(provider, path, req, body, key, timeoutMs, signal) {
 
 export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn',
   providers: definitions,
-  timeoutMs = 120_000, maxBodyBytes = 32 * 1024 * 1024, gatewayToken = '',
+  timeoutMs = 120_000, modelsTimeoutMs = 10_000, maxBodyBytes = 32 * 1024 * 1024, gatewayToken = '',
   logger = message => console.warn(message) }) {
   // 保留原单池 API 供现有集成使用；正常启动通过 providers.json 加载多厂商。
   const legacy = definitions === undefined;
@@ -103,7 +104,7 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
     const loaded = parseKeys((provider.keys ?? []).join('\n'), { allowEmpty: true });
     return [provider.id, provider.enabled && loaded.length ? new KeyQueue(loaded) : null];
   }));
-  for (const value of [timeoutMs, maxBodyBytes]) {
+  for (const value of [timeoutMs, modelsTimeoutMs, maxBodyBytes]) {
     if (!Number.isSafeInteger(value) || value <= 0) throw new Error('超时和请求大小必须是正整数');
   }
   return http.createServer(async (req, res) => {
@@ -136,10 +137,14 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
       const body = Buffer.concat(chunks);
       const pathname = req.url.split('?')[0];
       if (!legacy && req.method === 'GET' && pathname === '/v1/models') {
-        const data = providers.filter(provider => queues.get(provider.id)).flatMap(provider =>
-          provider.models.map(id => ({ id, object: 'model', created: 0, owned_by: provider.id })));
-        const result = Buffer.from(JSON.stringify({ object: 'list', data }));
-        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'content-length': result.length });
+        const catalog = await discoverModels({ providers, queues, signal: controller.signal, timeoutMs: modelsTimeoutMs, logger,
+          request: (provider, path, key, signal) => sendUpstream(provider, path, {
+            method: 'GET', headers: { accept: 'application/json', 'accept-encoding': 'identity' },
+          }, Buffer.alloc(0), key, modelsTimeoutMs, signal),
+        });
+        if (controller.signal.aborted) return;
+        const result = Buffer.from(JSON.stringify(catalog.body));
+        res.writeHead(catalog.status, { 'content-type': 'application/json; charset=utf-8', 'content-length': result.length });
         return res.end(result);
       }
       let route;
@@ -213,6 +218,7 @@ async function main() {
   const server = createGateway({
     providers,
     timeoutMs: Number(process.env.UPSTREAM_TIMEOUT_MS || 120000),
+    modelsTimeoutMs: Number(process.env.MODELS_TIMEOUT_MS || 10000),
     maxBodyBytes: Number(process.env.MAX_BODY_BYTES || 33554432),
     gatewayToken: process.env.GATEWAY_TOKEN || '',
   });
