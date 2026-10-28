@@ -1,0 +1,11 @@
+keys.txt
+keys/**/keys.txt
+*_keys.txt
+.env.*
+!.env.example
+.env
+node_modules/
+*.log
+.agents/
+.codex/
+.aws/

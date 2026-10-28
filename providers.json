@@ -1,0 +1,90 @@
+{
+  "providers": [
+    {
+      "id": "glm",
+      "origin": "https://open.bigmodel.cn",
+      "basePath": "/api/paas/v4",
+      "keysFile": "keys/glm/keys.txt",
+      "modelPrefixes": ["glm-", "cogview-", "cogvideo-"],
+      "models": ["glm-4.7", "glm-4.7-flash"],
+      "nativePrefixes": ["/api/paas/v4", "/api/coding/paas/v4"]
+    },
+    {
+      "id": "qwen",
+      "origin": "https://dashscope.aliyuncs.com",
+      "basePath": "/compatible-mode/v1",
+      "keysFile": "keys/qwen/keys.txt",
+      "modelPrefixes": ["qwen", "qwq-", "qvq-"],
+      "models": ["qwen-plus", "qwen-max", "qwen-turbo"],
+      "nativePrefixes": ["/compatible-mode/v1", "/api/v1"]
+    },
+    {
+      "id": "kimi",
+      "origin": "https://api.moonshot.cn",
+      "basePath": "/v1",
+      "keysFile": "keys/kimi/keys.txt",
+      "modelPrefixes": ["kimi-", "moonshot-"],
+      "models": ["kimi-k2.5"]
+    },
+    {
+      "id": "deepseek",
+      "origin": "https://api.deepseek.com",
+      "basePath": "/v1",
+      "keysFile": "keys/deepseek/keys.txt",
+      "modelPrefixes": ["deepseek-"],
+      "models": ["deepseek-chat", "deepseek-reasoner"]
+    },
+    {
+      "id": "minimax",
+      "origin": "https://api.minimax.cn",
+      "basePath": "/v1",
+      "keysFile": "keys/minimax/keys.txt",
+      "modelPrefixes": ["minimax-", "abab"],
+      "models": ["MiniMax-M2.5", "MiniMax-M2.7"]
+    },
+    {
+      "id": "openai",
+      "origin": "https://api.openai.com",
+      "basePath": "/v1",
+      "keysFile": "keys/openai/keys.txt",
+      "modelPrefixes": ["gpt-", "chatgpt-", "o1", "o3", "o4", "text-embedding-", "dall-e-", "whisper-", "tts-"],
+      "models": ["gpt-4.1"]
+    },
+    {
+      "id": "anthropic",
+      "origin": "https://api.anthropic.com",
+      "basePath": "/v1",
+      "keysFile": "keys/anthropic/keys.txt",
+      "auth": "x-api-key",
+      "headers": { "anthropic-version": "2023-06-01" },
+      "modelPrefixes": ["claude-"],
+      "models": ["claude-sonnet-4-6"]
+    },
+    {
+      "id": "gemini",
+      "origin": "https://generativelanguage.googleapis.com",
+      "basePath": "/v1beta/openai",
+      "keysFile": "keys/gemini/keys.txt",
+      "modelPrefixes": ["gemini-"],
+      "models": ["gemini-2.5-pro", "gemini-2.5-flash"],
+      "nativePrefixes": ["/v1beta/openai"]
+    },
+    {
+      "id": "doubao",
+      "origin": "https://ark.cn-beijing.volces.com",
+      "basePath": "/api/v3",
+      "keysFile": "keys/doubao/keys.txt",
+      "modelPrefixes": ["doubao-"],
+      "models": [],
+      "nativePrefixes": ["/api/v3"]
+    },
+    {
+      "id": "stepfun",
+      "origin": "https://api.stepfun.com",
+      "basePath": "/v1",
+      "keysFile": "keys/stepfun/keys.txt",
+      "modelPrefixes": ["step-"],
+      "models": ["step-3.5-flash"]
+    }
+  ]
+}
