@@ -39,26 +39,36 @@ async function readList(response) {
   }
 }
 
-async function queryProvider(provider, queue, request, parentSignal, timeoutMs) {
+async function queryProvider(provider, queue, request, parentSignal, timeoutMs, log) {
+  const started = performance.now();
   const signal = AbortSignal.any([parentSignal, AbortSignal.timeout(timeoutMs)]);
   const seen = new Set();
   let attempt;
   while (!signal.aborted && (attempt = queue.next(seen))) {
     seen.add(attempt.id);
+    const fields = { provider: provider.id, key_index: attempt.id, attempt: seen.size, operation: 'models' };
+    log('upstream_attempt', fields);
     try {
       let path = provider.modelsPath;
       const models = new Map();
       const cursors = new Set();
       for (let page = 0; page < MAX_PAGES; page++) {
+        const pageStarted = performance.now();
         const response = await request(provider, path, attempt.key, signal);
         const status = response.statusCode;
+        log('upstream_response', { ...fields, page: page + 1, status,
+          upstream_host: provider.origin.host, response_headers_ms: Math.round(performance.now() - pageStarted) });
         if (status < 200 || status >= 300) {
           response.destroy();
           throw new ListError('models_endpoint_error', status, provider.retryStatuses.includes(status) || status >= 500);
         }
         const list = await readList(response);
         for (const model of list.data) models.set(model.id, model);
-        if (!list.has_more) return { provider, models: [...models.values()] };
+        if (!list.has_more) {
+          log('models_provider_end', { ...fields, outcome: 'success', model_count: models.size,
+            duration_ms: Math.round(performance.now() - started) });
+          return { provider, models: [...models.values()] };
+        }
         // Anthropic-style cursor pagination, sharing the same key and time budget.
         if (typeof list.last_id !== 'string' || !list.last_id || cursors.has(list.last_id)) {
           throw new ListError('invalid_model_pagination');
@@ -73,7 +83,11 @@ async function queryProvider(provider, queue, request, parentSignal, timeoutMs) 
       if (parentSignal.aborted) return { provider, error: { provider: provider.id, code: 'request_aborted' } };
       if (!(error instanceof ListError)) error = new ListError('network_error', 502, true);
       if (signal.aborted) error = new ListError('models_timeout', 504, true);
-      if (error.retry) queue.fail(attempt);
+      if (error.retry) {
+        queue.fail(attempt);
+        log('key_rotated', { ...fields, status: error.status, reason: error.code, action: 'move_to_tail' });
+      }
+      log('models_attempt_error', { ...fields, status: error.status, error_code: error.code });
       const failure = { provider: provider.id, code: error.code, status: error.status, attempts: seen.size };
       if (!error.retry || signal.aborted) return { provider, error: failure };
       if (!queue.next(seen)) return { provider, error: failure };
@@ -94,14 +108,14 @@ function chooseSource(id, sources, providers) {
   return ranked[0]?.source;
 }
 
-export async function discoverModels({ providers, queues, request, signal, timeoutMs, logger }) {
+export async function discoverModels({ providers, queues, request, signal, timeoutMs, log = () => {} }) {
   const active = providers.filter(provider => queues.get(provider.id));
   if (!active.length) return { status: 503, body: { error: {
     code: 'no_configured_providers', message: '尚未配置任何已启用厂商的 API key。',
   } } };
-  const results = await Promise.all(active.map(provider => queryProvider(provider, queues.get(provider.id), request, signal, timeoutMs)));
+  const results = await Promise.all(active.map(provider => queryProvider(provider, queues.get(provider.id), request, signal, timeoutMs, log)));
   const errors = results.filter(result => result.error).map(result => result.error);
-  for (const error of errors) logger(`${error.provider}: model list failed (${error.code}${error.status ? `, HTTP ${error.status}` : ''})`);
+  for (const error of errors) log('models_provider_end', { ...error, outcome: 'error' });
   const successful = results.filter(result => !result.error);
   const candidates = new Map();
   for (const result of successful) {

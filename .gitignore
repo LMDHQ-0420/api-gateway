@@ -1,5 +1,5 @@
 keys.txt
-keys/**/keys.txt
+keys/
 *_keys.txt
 .env.*
 !.env.example

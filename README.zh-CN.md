@@ -105,6 +105,24 @@ HTTP `401`、`402`、`403`、`408`、`429`、`5xx`，以及连接失败和超时
 
 全部失败时返回 `error.code: "all_keys_unavailable"`，附带厂商 ID 和失败 key 索引。全部为限额或余额不足时返回 `429`，其余情况返回 `503`，不会包含完整 key。
 
+## 请求日志
+
+默认向标准输出写入 JSON 行日志，适用于终端、systemd journal 和 Docker 日志。每次请求分配独立的 `request_id`，记录接口、模型、目标厂商/上游主机和路径、协议、池内 key 索引、尝试次数、HTTP 状态和耗时。key 索引是启动时去重后的位置，不是 key 本身。
+
+事件包括 `request_start`、`route_selected`、`upstream_attempt`、`upstream_response`、`key_rotated` 和 `request_end`；模型列表另记录各厂商的结果和模型数量。`response_headers_ms` 是等待上游响应头的时间，`duration_ms` 是整次请求时间，流式请求持续到连接结束。
+
+`request_end.outcome` 区分 `success`、`http_error`、`partial_success`（模型列表部分厂商失败）、`client_disconnected` 和 `upstream_interrupted`。成功表示 HTTP 响应完整转发；网关不解析正文中的业务错误或 SSE 事件，因此 HTTP 200 不保证模型业务成功。
+
+日志不记录请求/响应正文、认证头、其他请求头、完整 key 或 URL 查询参数；未知路径段（如文件 ID）替换为 `:redacted`。仅从 JSON 请求提取模型名，最多记录 200 字符。模型名仍是日志元数据，请勿在其中填写秘密。
+
+本地持久服务可实时查看：
+
+```bash
+journalctl --user -u api-gateway.service -f -o cat
+```
+
+使用 `npm start` 时直接查看终端，Docker 使用 `docker logs -f api-gateway`。日志保留和轮转由 journal 或容器日志驱动管理。
+
 ## 配置
 
 复制 `.env.example` 为 `.env`，按需调整：

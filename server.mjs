@@ -1,6 +1,6 @@
 import http from 'node:http';
 import https from 'node:https';
-import { timingSafeEqual } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { pipeline } from 'node:stream';
 import { discoverModels } from './models.mjs';
@@ -10,6 +10,21 @@ const HOP_HEADERS = new Set([
   'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
   'te', 'trailer', 'transfer-encoding', 'upgrade', 'proxy-connection',
 ]);
+
+// Only fixed API path components are logged; queries and resource IDs are omitted.
+const LOG_PATH_PARTS = new Set(('api paas coding anthropic apps compatible compatible-mode v1 v1beta v4 chat completions messages count_tokens models files content embeddings responses images generations edits audio speech transcriptions translations batches tokenize rerank providers').split(' '));
+function logPath(path) {
+  return path.split('?')[0].split('/').slice(0, 16)
+    .map(part => !part || LOG_PATH_PARTS.has(part) ? part : ':redacted').join('/');
+}
+
+function requestModel(body, headers) {
+  if (!/(?:^|\/)json(?:\s*;|$)|\+json(?:\s*;|$)/i.test(headers['content-type'] || '')) return undefined;
+  try {
+    const model = JSON.parse(body.toString('utf8'))?.model;
+    return typeof model === 'string' ? model.slice(0, 200) : undefined;
+  } catch { return undefined; }
+}
 
 function cleanHeaders(headers) {
   const excluded = new Set(HOP_HEADERS);
@@ -51,6 +66,7 @@ export class KeyQueue {
 
 function jsonError(res, status, code, message, details = {}) {
   if (res.destroyed || res.headersSent) return;
+  res.gatewayErrorCode = code;
   const types = { 401: 'authentication_error', 403: 'permission_error', 413: 'request_too_large', 429: 'rate_limit_error', 504: 'timeout_error' };
   const payload = res.gatewayProtocol === 'anthropic'
     ? { type: 'error', error: { type: types[status] || (status >= 500 ? 'api_error' : 'invalid_request_error'), code, message, ...details } }
@@ -99,7 +115,7 @@ function sendUpstream(provider, path, req, body, key, timeoutMs, signal) {
 export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn',
   providers: definitions,
   timeoutMs = 120_000, modelsTimeoutMs = 10_000, maxBodyBytes = 32 * 1024 * 1024, gatewayToken = '',
-  logger = message => console.warn(message) }) {
+  logger = message => console.log(message) }) {
   // 保留原单池 API 供现有集成使用；正常启动通过 providers.json 加载多厂商。
   const legacy = definitions === undefined;
   const providers = prepareProviders(definitions ?? [{ id: 'glm', origin: upstreamOrigin,
@@ -112,6 +128,30 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
     if (!Number.isSafeInteger(value) || value <= 0) throw new Error('超时和请求大小必须是正整数');
   }
   return http.createServer(async (req, res) => {
+    const started = performance.now();
+    const requestId = randomUUID();
+    const state = { method: req.method, path: logPath(req.url || ''), attempts: 0 };
+    // Never forward Error objects, headers, query strings, or payloads to the logger.
+    // A broken log sink must not change routing or response behavior.
+    const log = (event, fields = {}) => {
+      if (event === 'upstream_attempt' && fields.operation === 'models') state.attempts++;
+      try { logger(JSON.stringify({ time: new Date().toISOString(), event, request_id: requestId, ...fields })); }
+      catch { /* The transport remains usable if the log sink fails. */ }
+    };
+    let completed = false;
+    const complete = () => {
+      if (completed) return;
+      completed = true;
+      const ended = res.writableFinished;
+      log('request_end', { ...state, status: res.headersSent ? res.statusCode : null,
+        outcome: !ended ? (state.error_code === 'upstream_interrupted' ? 'upstream_interrupted' : 'client_disconnected')
+          : res.statusCode >= 400 ? 'http_error' : state.partial_failure ? 'partial_success' : 'success',
+        ...(res.gatewayErrorCode ? { error_code: res.gatewayErrorCode } : {}),
+        duration_ms: Math.round(performance.now() - started) });
+    };
+    res.once('finish', complete);
+    res.once('close', complete);
+    log('request_start', { method: state.method, path: state.path });
     res.gatewayProtocol = /\/v1\/messages(?:\/|$)/.test((req.url || '').split('?')[0]) ? 'anthropic' : 'openai';
     const clientAuth = req.headers.authorization ?? (req.headers['x-api-key'] ? `Bearer ${req.headers['x-api-key']}` : undefined);
     if (!authorized(clientAuth, gatewayToken)) {
@@ -140,14 +180,20 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
         chunks.push(chunk);
       }
       const body = Buffer.concat(chunks);
+      state.model = requestModel(body, req.headers);
       const pathname = req.url.split('?')[0];
       if (!legacy && req.method === 'GET' && pathname === '/v1/models') {
-        const catalog = await discoverModels({ providers, queues, signal: controller.signal, timeoutMs: modelsTimeoutMs, logger,
+        state.protocol = 'models';
+        const catalog = await discoverModels({ providers, queues, signal: controller.signal, timeoutMs: modelsTimeoutMs, log,
           request: (provider, path, key, signal) => sendUpstream(provider, path, {
             method: 'GET', headers: { accept: 'application/json', 'accept-encoding': 'identity' },
           }, Buffer.alloc(0), key, modelsTimeoutMs, signal),
         });
         if (controller.signal.aborted) return;
+        state.protocol = 'models';
+        state.model_count = catalog.body.data?.length || 0;
+        state.partial_failure = Boolean(catalog.body.errors?.length);
+        state.error_code = catalog.body.error?.code;
         const result = Buffer.from(JSON.stringify(catalog.body));
         res.writeHead(catalog.status, { 'content-type': 'application/json; charset=utf-8', 'content-length': result.length });
         return res.end(result);
@@ -160,6 +206,9 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
         return jsonError(res, error.status, error.code, error.message, error.details);
       }
       const { provider, path } = route;
+      Object.assign(state, { provider: provider.id, protocol: route.protocol || 'openai',
+        upstream_host: provider.origin.host, upstream_path: logPath(path) });
+      log('route_selected', { ...state });
       // Per-request protocol settings keep concurrent OpenAI/Messages requests isolated.
       const upstreamProvider = route.protocol === 'anthropic' ? { ...provider,
         auth: provider.messagesAuth, headers: { 'anthropic-version': '2023-06-01', ...provider.headers },
@@ -173,6 +222,11 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
       let attempt;
       while (!controller.signal.aborted && (attempt = queue.next(seen))) {
         seen.add(attempt.id);
+        state.attempts = seen.size;
+        state.key_index = attempt.id;
+        const attemptStarted = performance.now();
+        const attemptFields = { provider: provider.id, key_index: attempt.id, attempt: seen.size };
+        log('upstream_attempt', attemptFields);
         let upstream;
         try {
           upstream = await sendUpstream(upstreamProvider, path, req, body, attempt.key, timeoutMs, controller.signal);
@@ -180,27 +234,32 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
           if (controller.signal.aborted) return;
           queue.fail(attempt);
           failures.push({ key_index: attempt.id, reason: error.code === 'ETIMEDOUT' ? 'timeout' : 'network_error' });
-          logger(`${provider.id} key #${attempt.id}: upstream connection failed; moved to queue tail`);
+          log('key_rotated', { ...attemptFields, reason: error.code === 'ETIMEDOUT' ? 'timeout' : 'network_error',
+            action: 'move_to_tail', duration_ms: Math.round(performance.now() - attemptStarted) });
           continue;
         }
         const status = upstream.statusCode;
+        log('upstream_response', { ...attemptFields, status,
+          response_headers_ms: Math.round(performance.now() - attemptStarted) });
         if (provider.retryStatuses.includes(status) || status >= 500) {
           // 错误正文可能包含敏感信息；聚合错误仅报告索引和 HTTP 状态。
           upstream.destroy();
           queue.fail(attempt);
           failures.push({ key_index: attempt.id, status });
-          logger(`${provider.id} key #${attempt.id}: HTTP ${status}; moved to queue tail`);
+          log('key_rotated', { ...attemptFields, status, reason: 'http_error', action: 'move_to_tail' });
           continue;
         }
         const headers = cleanHeaders(upstream.headers);
         delete headers['set-cookie'];
         // 直接转发原始字节，包括压缩内容和 SSE；背压及断开交由 pipeline 处理。
+        state.stream = (headers['content-type'] || '').includes('text/event-stream');
         res.writeHead(status, headers);
         res.flushHeaders();
         upstream.once('aborted', () => {
           if (!controller.signal.aborted) {
             queue.fail(attempt);
-            logger(`${provider.id} key #${attempt.id}: upstream response interrupted; moved to queue tail`);
+            state.error_code = 'upstream_interrupted';
+            log('key_rotated', { ...attemptFields, reason: 'upstream_interrupted', action: 'move_to_tail' });
           }
         });
         pipeline(upstream, res, () => {

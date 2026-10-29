@@ -105,6 +105,24 @@ HTTP `401`, `402`, `403`, `408`, `429`, `5xx`, connection failures and timeouts 
 
 If the pool is exhausted, the gateway returns `error.code: "all_keys_unavailable"`, the provider ID and per-key failure indices. The status is `429` when every failure is quota/balance-related, otherwise `503`. Full keys are never included.
 
+## Request logs
+
+The gateway writes JSON lines to stdout by default, suitable for terminals, systemd journal, and Docker logs. Each request has a unique `request_id`, with its endpoint, model, provider, upstream host/path, protocol, key index, attempts, HTTP status, and timing. Key indexes refer to the deduplicated pool order at startup, never the key value.
+
+Events include `request_start`, `route_selected`, `upstream_attempt`, `upstream_response`, `key_rotated`, and `request_end`. Model discovery also logs each provider's result and model count. `response_headers_ms` measures time to upstream headers; `duration_ms` measures the full request, including streaming until the connection ends.
+
+Final outcomes are `success`, `http_error`, `partial_success` (some model catalogs failed), `client_disconnected`, or `upstream_interrupted`. Success means the HTTP response was fully forwarded. Payload-level errors and SSE events are not inspected, so HTTP 200 does not guarantee model-level success.
+
+Logs exclude request/response bodies, authentication and other request headers, key values, and query strings. Unknown path components, such as file IDs, become `:redacted`. Only the model field is extracted from JSON requests, capped at 200 characters; do not put secrets in model names.
+
+For the local persistent service:
+
+```bash
+journalctl --user -u api-gateway.service -f -o cat
+```
+
+With `npm start`, watch the terminal; with Docker, use `docker logs -f api-gateway`. Retention and rotation are managed by journal or the container logging driver.
+
 ## Configuration
 
 Copy `.env.example` to `.env` for optional overrides:
