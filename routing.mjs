@@ -32,6 +32,13 @@ export function prepareProviders(definitions) {
     }
     const validPath = path => typeof path === 'string' && /^\/(?!\/)[^?#\\]*$/.test(path) && !path.endsWith('/') && !path.split('/').some(part => part === '.' || part === '..');
     if (!validPath(basePath)) throw new Error(`厂商 ${id} 的 basePath 配置无效`);
+    const messagesBasePath = definition.messagesBasePath === undefined
+      ? (id === 'anthropic' ? '/v1' : null) : definition.messagesBasePath;
+    if (messagesBasePath !== null && !validPath(messagesBasePath)) {
+      throw new Error(`厂商 ${id} 的 messagesBasePath 配置无效`);
+    }
+    const messagesAuth = definition.messagesAuth ?? auth;
+    if (!['bearer', 'x-api-key'].includes(messagesAuth)) throw new Error(`厂商 ${id} 的 messagesAuth 配置无效`);
     const modelsPath = definition.modelsPath ?? `${basePath}/models`;
     if (typeof modelsPath !== 'string' || !modelsPath.startsWith('/') || modelsPath.startsWith('//') || /[#\\\r\n]/.test(modelsPath)) {
       throw new Error(`厂商 ${id} 的 modelsPath 必须是官方模型列表的绝对路径`);
@@ -50,7 +57,7 @@ export function prepareProviders(definitions) {
     if (!Array.isArray(retryStatuses) || retryStatuses.some(status => !Number.isInteger(status) || status < 400 || status > 599)) {
       throw new Error(`厂商 ${id} 的 retryStatuses 必须是 HTTP 错误状态码数组`);
     }
-    return { ...definition, id, origin, basePath, auth, enabled, headers, nativePrefixes, retryStatuses, modelsPath,
+    return { ...definition, id, origin, basePath, auth, enabled, headers, nativePrefixes, retryStatuses, modelsPath, messagesBasePath, messagesAuth,
       models: strings(definition.models ?? [], 'models'),
       modelPrefixes: strings(definition.modelPrefixes ?? [], 'modelPrefixes'),
     };
@@ -105,6 +112,28 @@ function modelProvider(model, providers) {
   return selectUnique([...new Set(matches.filter(item => item.length === longest).map(item => item.provider))], 'ambiguous_model');
 }
 
+function messagePath(path, base = '/v1') {
+  return path === `${base}/messages` || path.startsWith(`${base}/messages/`);
+}
+
+function routeProviderPath(provider, path, query, preserveNative = false) {
+  if (messagePath(path, '/v1/v1')) {
+    throw new RoutingError(400, 'invalid_anthropic_base_url', 'Claude Code 的 ANTHROPIC_BASE_URL 应填写网关根地址，不要在末尾添加 /v1。');
+  }
+  if (messagePath(path)) {
+    if (!provider.messagesBasePath) {
+      throw new RoutingError(501, 'unsupported_protocol', '该厂商未配置官方 Anthropic Messages 接口，请使用 OpenAI 接口或配置 messagesBasePath。',
+        { provider: provider.id });
+    }
+    return { provider, path: provider.messagesBasePath + path.slice(3) + query, protocol: 'anthropic' };
+  }
+  if (provider.messagesBasePath && messagePath(path, provider.messagesBasePath)) {
+    return { provider, path: path + query, protocol: 'anthropic' };
+  }
+  return { provider, path: !preserveNative && (path === '/v1' || path.startsWith('/v1/'))
+    ? provider.basePath + path.slice(3) + query : path + query };
+}
+
 export function routeRequest(rawUrl, headers, body, providers) {
   const queryIndex = rawUrl.indexOf('?');
   const path = queryIndex < 0 ? rawUrl : rawUrl.slice(0, queryIndex);
@@ -114,13 +143,14 @@ export function routeRequest(rawUrl, headers, body, providers) {
   if (scoped) {
     const provider = enabled.find(item => item.id === scoped[1]);
     if (!provider) throw new RoutingError(404, 'unknown_provider', '该厂商不存在或已禁用。');
-    // 厂商专属 URL 后的路径完全照官方转发，可调用不带 model 的接口。
-    return { provider, path: (scoped[2] || '/') + query };
+    // 专属 URL 固定厂商；标准 Messages 路径映射，其余官方路径原样转发。
+    return routeProviderPath(provider, scoped[2] || '/', query, true);
   }
   if (path.startsWith('/providers/')) throw new RoutingError(404, 'unknown_provider', '厂商 URL 格式不正确。');
 
   const native = selectUnique(enabled.filter(provider => provider.nativePrefixes.some(prefix =>
-    path === prefix || path.startsWith(prefix + '/'))), 'ambiguous_path');
+    path === prefix || path.startsWith(prefix + '/')) || (provider.messagesBasePath &&
+      provider.messagesBasePath !== '/v1' && messagePath(path, provider.messagesBasePath))), 'ambiguous_path');
   let model;
   if (body.length && /(?:^|\/)json(?:\s*;|$)|\+json(?:\s*;|$)/i.test(headers['content-type'] || '')) {
     let data;
@@ -142,6 +172,5 @@ export function routeRequest(rawUrl, headers, body, providers) {
   if (!provider) {
     throw new RoutingError(400, 'provider_required', '自动分流需要 JSON 请求体中的 model；不带 model 的接口请使用 /providers/<厂商>/官方路径。');
   }
-  return { provider, path: !native && (path === '/v1' || path.startsWith('/v1/'))
-    ? provider.basePath + path.slice(3) + query : rawUrl };
+  return routeProviderPath(provider, path, query, Boolean(native));
 }

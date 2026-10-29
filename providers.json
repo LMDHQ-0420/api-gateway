@@ -7,7 +7,9 @@
       "keysFile": "keys/glm/keys.txt",
       "modelPrefixes": ["glm-", "cogview-", "cogvideo-"],
       "models": ["glm-4.7", "glm-4.7-flash"],
-      "nativePrefixes": ["/api/paas/v4", "/api/coding/paas/v4"]
+      "nativePrefixes": ["/api/paas/v4", "/api/coding/paas/v4"],
+      "messagesBasePath": "/api/anthropic/v1",
+      "messagesAuth": "x-api-key"
     },
     {
       "id": "qwen",
@@ -16,7 +18,9 @@
       "keysFile": "keys/qwen/keys.txt",
       "modelPrefixes": ["qwen", "qwq-", "qvq-"],
       "models": ["qwen-plus", "qwen-max", "qwen-turbo"],
-      "nativePrefixes": ["/compatible-mode/v1", "/api/v1"]
+      "nativePrefixes": ["/compatible-mode/v1", "/api/v1"],
+      "messagesBasePath": "/apps/anthropic/v1",
+      "messagesAuth": "bearer"
     },
     {
       "id": "kimi",
@@ -24,7 +28,9 @@
       "basePath": "/v1",
       "keysFile": "keys/kimi/keys.txt",
       "modelPrefixes": ["kimi-", "moonshot-"],
-      "models": ["kimi-k2.5"]
+      "models": ["kimi-k2.5"],
+      "messagesBasePath": "/anthropic/v1",
+      "messagesAuth": "bearer"
     },
     {
       "id": "deepseek",
@@ -32,7 +38,9 @@
       "basePath": "/v1",
       "keysFile": "keys/deepseek/keys.txt",
       "modelPrefixes": ["deepseek-"],
-      "models": ["deepseek-chat", "deepseek-reasoner"]
+      "models": ["deepseek-chat", "deepseek-reasoner"],
+      "messagesBasePath": "/anthropic/v1",
+      "messagesAuth": "x-api-key"
     },
     {
       "id": "minimax",
@@ -40,7 +48,9 @@
       "basePath": "/v1",
       "keysFile": "keys/minimax/keys.txt",
       "modelPrefixes": ["minimax-", "abab"],
-      "models": ["MiniMax-M2.5", "MiniMax-M2.7"]
+      "models": ["MiniMax-M2.5", "MiniMax-M2.7"],
+      "messagesBasePath": "/anthropic/v1",
+      "messagesAuth": "bearer"
     },
     {
       "id": "openai",
@@ -56,9 +66,13 @@
       "basePath": "/v1",
       "keysFile": "keys/anthropic/keys.txt",
       "auth": "x-api-key",
-      "headers": { "anthropic-version": "2023-06-01" },
+      "headers": {
+        "anthropic-version": "2023-06-01"
+      },
       "modelPrefixes": ["claude-"],
-      "models": ["claude-sonnet-4-6"]
+      "models": ["claude-sonnet-4-6"],
+      "messagesBasePath": "/v1",
+      "messagesAuth": "x-api-key"
     },
     {
       "id": "gemini",
@@ -76,7 +90,9 @@
       "keysFile": "keys/doubao/keys.txt",
       "modelPrefixes": ["doubao-"],
       "models": [],
-      "nativePrefixes": ["/api/v3"]
+      "nativePrefixes": ["/api/v3"],
+      "messagesBasePath": "/api/compatible/v1",
+      "messagesAuth": "bearer"
     },
     {
       "id": "stepfun",
@@ -84,7 +100,9 @@
       "basePath": "/v1",
       "keysFile": "keys/stepfun/keys.txt",
       "modelPrefixes": ["step-"],
-      "models": ["step-3.5-flash"]
+      "models": ["step-3.5-flash"],
+      "messagesBasePath": "/v1",
+      "messagesAuth": "bearer"
     }
   ]
 }

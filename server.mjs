@@ -51,7 +51,11 @@ export class KeyQueue {
 
 function jsonError(res, status, code, message, details = {}) {
   if (res.destroyed || res.headersSent) return;
-  const body = Buffer.from(JSON.stringify({ error: { code, message, ...details } }));
+  const types = { 401: 'authentication_error', 403: 'permission_error', 413: 'request_too_large', 429: 'rate_limit_error', 504: 'timeout_error' };
+  const payload = res.gatewayProtocol === 'anthropic'
+    ? { type: 'error', error: { type: types[status] || (status >= 500 ? 'api_error' : 'invalid_request_error'), code, message, ...details } }
+    : { error: { code, message, ...details } };
+  const body = Buffer.from(JSON.stringify(payload));
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'content-length': body.length });
   res.end(body);
 }
@@ -108,6 +112,7 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
     if (!Number.isSafeInteger(value) || value <= 0) throw new Error('超时和请求大小必须是正整数');
   }
   return http.createServer(async (req, res) => {
+    res.gatewayProtocol = /\/v1\/messages(?:\/|$)/.test((req.url || '').split('?')[0]) ? 'anthropic' : 'openai';
     const clientAuth = req.headers.authorization ?? (req.headers['x-api-key'] ? `Bearer ${req.headers['x-api-key']}` : undefined);
     if (!authorized(clientAuth, gatewayToken)) {
       req.resume();
@@ -155,6 +160,10 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
         return jsonError(res, error.status, error.code, error.message, error.details);
       }
       const { provider, path } = route;
+      // Per-request protocol settings keep concurrent OpenAI/Messages requests isolated.
+      const upstreamProvider = route.protocol === 'anthropic' ? { ...provider,
+        auth: provider.messagesAuth, headers: { 'anthropic-version': '2023-06-01', ...provider.headers },
+      } : provider;
       const queue = queues.get(provider.id);
       if (!queue) {
         return jsonError(res, 503, 'provider_not_configured', '该厂商尚未配置可用 key，请填写对应的 key 文件并重启。',
@@ -166,7 +175,7 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
         seen.add(attempt.id);
         let upstream;
         try {
-          upstream = await sendUpstream(provider, path, req, body, attempt.key, timeoutMs, controller.signal);
+          upstream = await sendUpstream(upstreamProvider, path, req, body, attempt.key, timeoutMs, controller.signal);
         } catch (error) {
           if (controller.signal.aborted) return;
           queue.fail(attempt);

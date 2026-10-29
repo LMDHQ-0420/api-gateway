@@ -10,6 +10,7 @@
 - 内置 GLM、Qwen、Kimi、DeepSeek、MiniMax、OpenAI、Claude、Gemini、豆包和阶跃星辰路由。
 - 各厂商独立按队列切换，重试有界，不做负载均衡或跨厂商兜底。
 - 实时查询已配置官方 API 的模型列表，单独报告查询失败的厂商。
+- 同时支持 OpenAI Chat Completions 和 Anthropic Messages，路由至各厂商官方接口。
 - 保留原始请求体、模型名、工具调用和 SSE 响应字节。
 - 标准 SDK 和 HTTP 客户端修改基础 URL 即可接入。
 - 仅使用 Node.js 内置模块，无第三方运行依赖。
@@ -47,7 +48,9 @@ curl http://127.0.0.1:3000/v1/chat/completions \
 
 | 接口 | 行为 |
 | --- | --- |
-| `/v1/chat/completions` | 根据 `model` 分流并映射官方基础路径 |
+| `/v1/chat/completions` | 根据 `model` 路由 OpenAI 格式请求 |
+| `/v1/messages` | 将 Claude Code / Anthropic 格式请求路由至官方 Messages 接口 |
+| `/v1/messages/count_tokens` | 转发官方 token 计数接口，需上游支持 |
 | `/v1/models` | 实时查询已启用且加载 key 的官方模型列表 |
 | `/api/paas/v4/...` | 保留 GLM 官方路径 |
 | `/api/coding/paas/v4/...` | 保留 GLM Coding Plan 路径 |
@@ -59,7 +62,36 @@ curl http://127.0.0.1:3000/v1/chat/completions \
 
 查询列表与模型调用共用各厂商的 key 队列。列表查询成功不代表每个模型当前都有额度或调用权限；厂商专属列表 URL 仍原样返回官方响应。
 
-**请求协议保持官方格式。** Claude 使用 `/v1/messages` 和官方 Messages 请求体；Gemini 使用其官方 OpenAI 兼容接口。网关不转换 Chat Completions、Messages 等协议。
+### Claude Code
+
+将 Anthropic 基础地址设为网关根地址，**不要在末尾加 `/v1`**：
+
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:3000
+export ANTHROPIC_AUTH_TOKEN=gateway
+export ANTHROPIC_MODEL=glm-5.3
+export ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.3
+export ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5.3
+export ANTHROPIC_DEFAULT_HAIKU_MODEL=glm-5.3
+claude
+```
+
+启用访问口令后，将 `gateway` 替换为 `GATEWAY_TOKEN`；内网客户端把主机地址换为网关所在机器的地址。模型填写实际官方 ID，网关不改写 Claude 模型别名。也可用 `/providers/<id>` 显式选择厂商，其 `/v1/messages` 请求会映射到该厂商的官方 Messages 路径。
+
+内置 Messages 路径（使用对应厂商配置的 origin）：
+
+| 厂商 | `messagesBasePath` |
+| --- | --- |
+| GLM | `/api/anthropic/v1` |
+| Qwen / Token Plan | `/apps/anthropic/v1` |
+| 普通 Kimi API / Kimi Code | `/anthropic/v1` / `/coding/v1` |
+| DeepSeek / MiniMax | `/anthropic/v1` |
+| Anthropic / 阶跃星辰 | `/v1` |
+| 豆包 | `/api/compatible/v1` |
+
+官方参考：[GLM](https://docs.bigmodel.cn/cn/guide/develop/claude/introduction)、[Qwen](https://www.alibabacloud.com/help/en/model-studio/anthropic-api-messages)、[Kimi](https://platform.kimi.com/docs/guide/claude-code-kimi)、[DeepSeek](https://api-docs.deepseek.com/guides/anthropic_api/)。
+
+**请求协议保持官方格式。** 网关只选择官方路径和认证，不转换请求体或 SSE 事件。OpenAI、Gemini 未配置 Messages 接口时返回 `501 unsupported_protocol`。可用模型和 `count_tokens` 支持范围由对应官方服务决定；模型列表中的图片、音频模型不一定能用于 Claude Code。
 
 ## key 队列
 
@@ -88,7 +120,7 @@ HTTP `401`、`402`、`403`、`408`、`429`、`5xx`，以及连接失败和超时
 
 编辑 [providers.json](providers.json) 调整官方地址、地域和模型规则。每个厂商配置包含 `id`、`origin`、`basePath`、`keysFile`、`modelPrefixes` 和 `models`。key 路径相对配置文件解析；配置中的精确模型匹配优先，其次是已发现的模型 ID，最后取最长前缀。`models` 用于显式指定模型路由，包括豆包 `ep-...` 接入点 ID，不会直接添加到实时列表。多个厂商返回相同模型 ID 时，依次按显式映射、所属模型前缀、配置顺序选择来源。
 
-其他选项包括 `modelsPath`（默认 `<basePath>/models`）、`enabled`、`nativePrefixes`、`auth`（`bearer` 或 `x-api-key`）、默认 `headers` 和 `retryStatuses`。新增厂商条目后运行 `npm run init-keys` 即可创建新池。官方地址需与 key 的地域和套餐匹配；统一入口使用 GLM Coding Plan 时，需相应修改 GLM 的 `basePath`。
+其他选项包括 `messagesBasePath`（包含 `/v1` 的完整前缀）、`messagesAuth`（默认沿用 `auth`）、`modelsPath`（默认 `<basePath>/models`）、`enabled`、`nativePrefixes`、`auth`（`bearer` 或 `x-api-key`）、默认 `headers` 和 `retryStatuses`。新增厂商条目后运行 `npm run init-keys` 即可创建新池。官方地址需与 key 的地域和套餐匹配；统一入口使用 GLM Coding Plan 时，需相应修改 GLM 的 `basePath`。
 
 启用 `GATEWAY_TOKEN` 后，客户端使用 `Authorization: Bearer <口令>` 或 Claude 的 `x-api-key`。key 文件和 `.env` 已加入 Git 忽略规则，自定义 key 文件位置也应加入 `.gitignore`。旧版根目录 `keys.txt` 仅在 GLM 专属文件为空时作为回退。
 

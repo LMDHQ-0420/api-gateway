@@ -10,6 +10,7 @@ A lightweight gateway that routes requests to official model providers. Each pro
 - Built-in routing for GLM, Qwen, Kimi, DeepSeek, MiniMax, OpenAI, Claude, Gemini, Doubao and StepFun.
 - Independent, ordered key pools with bounded retries; no load balancing or cross-provider fallback.
 - Live model discovery from configured official APIs, with failed providers reported separately.
+- Dual OpenAI Chat Completions and Anthropic Messages routing via official provider endpoints.
 - Original request bodies, model names, tool calls and SSE response bytes preserved.
 - Standard SDKs and HTTP clients supported by changing the base URL.
 - Node.js built-in modules only; no third-party runtime dependencies.
@@ -47,7 +48,9 @@ Change `model` to select another provider. Set `stream: true` for SSE; use `curl
 
 | Endpoint | Behavior |
 | --- | --- |
-| `/v1/chat/completions` | Route by `model`, map to the provider's official base path |
+| `/v1/chat/completions` | Route OpenAI requests by `model` |
+| `/v1/messages` | Route Claude Code / Anthropic requests to the official Messages endpoint |
+| `/v1/messages/count_tokens` | Forward to the official token-counting endpoint, when supported |
 | `/v1/models` | Query official model lists for enabled providers with loaded keys |
 | `/api/paas/v4/...` | Preserve GLM's official path |
 | `/api/coding/paas/v4/...` | Preserve GLM's Coding Plan path |
@@ -59,7 +62,36 @@ For example, `/providers/kimi/v1/files` forwards to Kimi's `/v1/files`.
 
 Discovery uses the same key queues as inference. A successful catalog request does not guarantee quota or access for every listed model. Provider-specific list URLs still return the original official response.
 
-**Protocols stay provider-native.** Claude uses `/v1/messages` and the official Messages body. Gemini uses its official OpenAI-compatible endpoint. The gateway does not convert Chat Completions, Messages or other protocols.
+### Claude Code
+
+Use the gateway origin as the Anthropic base URL, **without a trailing `/v1`**:
+
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:3000
+export ANTHROPIC_AUTH_TOKEN=gateway
+export ANTHROPIC_MODEL=glm-5.3
+export ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.3
+export ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5.3
+export ANTHROPIC_DEFAULT_HAIKU_MODEL=glm-5.3
+claude
+```
+
+Use your configured `GATEWAY_TOKEN` instead of `gateway` when enabled; LAN clients replace the host with the gateway machine's address. Select actual provider model IDs; the gateway does not rename Claude model aliases. For explicit provider selection, set the base URL to `/providers/<id>`; its `/v1/messages` requests are mapped to that provider's official Messages path.
+
+Built-in Messages paths (on the provider's configured origin):
+
+| Provider | `messagesBasePath` |
+| --- | --- |
+| GLM | `/api/anthropic/v1` |
+| Qwen / Token Plan | `/apps/anthropic/v1` |
+| Kimi API / Kimi Code | `/anthropic/v1` / `/coding/v1` |
+| DeepSeek / MiniMax | `/anthropic/v1` |
+| Anthropic / StepFun | `/v1` |
+| Doubao | `/api/compatible/v1` |
+
+Sources: [GLM](https://docs.bigmodel.cn/cn/guide/develop/claude/introduction), [Qwen](https://www.alibabacloud.com/help/en/model-studio/anthropic-api-messages), [Kimi](https://platform.kimi.com/docs/guide/claude-code-kimi), [DeepSeek](https://api-docs.deepseek.com/guides/anthropic_api/).
+
+**Protocols stay provider-native.** The gateway selects official paths and credentials; it does not translate request bodies or SSE events. OpenAI and Gemini have no Messages endpoint configured and return `501 unsupported_protocol`. Available models and `count_tokens` support depend on the selected official service; an image/audio model listed in `/v1/models` is not necessarily usable with Claude Code.
 
 ## Key queues
 
@@ -88,7 +120,7 @@ Copy `.env.example` to `.env` for optional overrides:
 
 Edit [providers.json](providers.json) to change official endpoints, regions or model rules. Each entry defines `id`, `origin`, `basePath`, `keysFile`, `modelPrefixes` and `models`. Key paths are relative to the configuration file. Configured exact model matches take priority, followed by discovered IDs, then the longest prefix. Use `models` for explicit routing overrides, including Doubao endpoint IDs such as `ep-...`; this does not add entries to the live catalog. Duplicate discovered IDs prefer an explicit mapping, then the provider's model prefix, then configuration order.
 
-Additional options include `modelsPath` (defaults to `<basePath>/models`), `enabled`, `nativePrefixes`, `auth` (`bearer` or `x-api-key`), default `headers` and `retryStatuses`. Add another entry and run `npm run init-keys` to create a new provider pool. Match the official endpoint to your key's region and plan. For GLM Coding Plan on the unified route, change GLM's `basePath` accordingly.
+Additional options include `messagesBasePath` (full prefix including `/v1`), `messagesAuth` (defaults to `auth`), `modelsPath` (defaults to `<basePath>/models`), `enabled`, `nativePrefixes`, `auth` (`bearer` or `x-api-key`), default `headers` and `retryStatuses`. Add another entry and run `npm run init-keys` to create a new provider pool. Match the official endpoint to your key's region and plan. For GLM Coding Plan on the unified route, change GLM's `basePath` accordingly.
 
 With `GATEWAY_TOKEN` enabled, clients use `Authorization: Bearer <token>` or Claude's `x-api-key`. Key files and `.env` are Git-ignored; add custom key-file locations to `.gitignore` too. Legacy root `keys.txt` remains a GLM fallback when its dedicated file is empty.
 
