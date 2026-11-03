@@ -43,25 +43,60 @@ export function parseKeys(text, { allowEmpty = false } = {}) {
 }
 
 export class KeyQueue {
-  constructor(keys) {
-    this.entries = [...new Set(keys)].map((key, index) => ({ key, id: index + 1, version: 0 }));
+  constructor(keys, { cooldownMs = 30_000, authCooldownMs = 300_000, now = Date.now } = {}) {
+    for (const value of [cooldownMs, authCooldownMs]) {
+      if (!Number.isSafeInteger(value) || value < 0) throw new Error('key 冷却时间必须是非负整数');
+    }
+    Object.assign(this, { cooldownMs, authCooldownMs, now });
+    this.entries = [...new Set(keys)].map((key, index) => ({ key, id: index + 1, version: 0, cooldowns: new Map() }));
     if (!this.entries.length) throw new Error('至少需要一个 key');
   }
 
-  next(seen) {
-    const entry = this.entries.find(item => !seen.has(item.id));
-    return entry && { ...entry };
+  blocked(entry, scope) {
+    const now = this.now();
+    for (const [name, failure] of entry.cooldowns) if (failure.until <= now) entry.cooldowns.delete(name);
+    return entry.cooldowns.get('*') || entry.cooldowns.get(scope);
   }
 
-  fail(attempt) {
+  next(seen, scope = '') {
+    const entry = this.entries.find(item => !seen.has(item.id) && !this.blocked(item, scope));
+    return entry && { ...entry, scope };
+  }
+
+  cooling(scope = '', seen = new Set()) {
+    return this.entries.filter(entry => !seen.has(entry.id)).flatMap(entry => {
+      const failure = this.blocked(entry, scope);
+      return failure ? [{ key_index: entry.id, status: failure.status,
+        retry_after_ms: Math.max(1, failure.until - this.now()) }] : [];
+    });
+  }
+
+  fail(attempt, { status, retryAfterMs = 0 } = {}) {
     const index = this.entries.findIndex(item => item.id === attempt.id);
     const entry = this.entries[index];
-    // 同一代 key 的多个并发失败只移动一次，避免旧请求打乱新队列。
-    if (!entry || entry.version !== attempt.version) return;
+    // Stale concurrent failures neither rotate again nor extend a newer cooldown.
+    if (!entry || entry.version !== attempt.version) return null;
     this.entries.splice(index, 1);
     entry.version++;
     this.entries.push(entry);
+    const configured = status === 401 ? this.authCooldownMs : [402, 429].includes(status) ? this.cooldownMs : 0;
+    const duration = configured ? Math.max(configured, Math.min(3_600_000, retryAfterMs)) : 0;
+    if (duration) {
+      const scope = status === 401 ? '*' : attempt.scope || '';
+      if (entry.cooldowns.size >= 64 && !entry.cooldowns.has(scope)) {
+        entry.cooldowns.delete(entry.cooldowns.keys().next().value);
+      }
+      entry.cooldowns.set(scope, { status, until: this.now() + duration });
+    }
+    return { cooldown_ms: duration };
   }
+}
+
+function retryAfterMs(value) {
+  if (typeof value !== 'string') return 0;
+  const seconds = Number(value);
+  const ms = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(value) - Date.now();
+  return Number.isFinite(ms) ? Math.max(0, Math.min(ms, 3_600_000)) : 0;
 }
 
 function jsonError(res, status, code, message, details = {}) {
@@ -115,6 +150,7 @@ function sendUpstream(provider, path, req, body, key, timeoutMs, signal) {
 export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn',
   providers: definitions,
   timeoutMs = 120_000, modelsTimeoutMs = 10_000, maxBodyBytes = 32 * 1024 * 1024, gatewayToken = '',
+  keyCooldownMs = 30_000, authCooldownMs = 300_000,
   logger = message => console.log(message) }) {
   // 保留原单池 API 供现有集成使用；正常启动通过 providers.json 加载多厂商。
   const legacy = definitions === undefined;
@@ -122,7 +158,7 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
     basePath: '/api/paas/v4', keys }]);
   const queues = new Map(providers.map(provider => {
     const loaded = parseKeys((provider.keys ?? []).join('\n'), { allowEmpty: true });
-    return [provider.id, provider.enabled && loaded.length ? new KeyQueue(loaded) : null];
+    return [provider.id, provider.enabled && loaded.length ? new KeyQueue(loaded, { cooldownMs: keyCooldownMs, authCooldownMs }) : null];
   }));
   for (const value of [timeoutMs, modelsTimeoutMs, maxBodyBytes]) {
     if (!Number.isSafeInteger(value) || value <= 0) throw new Error('超时和请求大小必须是正整数');
@@ -218,9 +254,12 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
         return jsonError(res, 503, 'provider_not_configured', '该厂商尚未配置可用 key，请填写对应的 key 文件并重启。',
           { provider: provider.id });
       }
+      const scope = JSON.stringify([route.protocol || 'openai', path.split('?')[0], state.model?.toLowerCase() || '']);
       const seen = new Set();
+      const skipped = queue.cooling(scope);
+      if (skipped.length) log('cooldown_skipped', { provider: provider.id, keys: skipped.map(item => item.key_index) });
       let attempt;
-      while (!controller.signal.aborted && (attempt = queue.next(seen))) {
+      while (!controller.signal.aborted && (attempt = queue.next(seen, scope))) {
         seen.add(attempt.id);
         state.attempts = seen.size;
         state.key_index = attempt.id;
@@ -244,14 +283,16 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
         if (provider.retryStatuses.includes(status) || status >= 500) {
           // 错误正文可能包含敏感信息；聚合错误仅报告索引和 HTTP 状态。
           upstream.destroy();
-          queue.fail(attempt);
+          const rotation = queue.fail(attempt, { status, retryAfterMs: retryAfterMs(upstream.headers['retry-after']) });
           failures.push({ key_index: attempt.id, status });
-          log('key_rotated', { ...attemptFields, status, reason: 'http_error', action: 'move_to_tail' });
+          log('key_rotated', { ...attemptFields, status, reason: 'http_error',
+            action: rotation ? 'move_to_tail' : 'already_rotated', cooldown_ms: rotation?.cooldown_ms || 0 });
           continue;
         }
         const headers = cleanHeaders(upstream.headers);
         delete headers['set-cookie'];
         // 直接转发原始字节，包括压缩内容和 SSE；背压及断开交由 pipeline 处理。
+        state.response_headers_ms = Math.round(performance.now() - started);
         state.stream = (headers['content-type'] || '').includes('text/event-stream');
         res.writeHead(status, headers);
         res.flushHeaders();
@@ -267,10 +308,18 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
         });
         return;
       }
-      const allLimited = failures.length > 0 && failures.every(item => [402, 429].includes(item.status));
+      const cooling = queue.cooling(scope, seen);
+      const unavailable = [...failures, ...cooling];
+      const allCooling = queue.cooling(scope);
+      if (allCooling.length === queue.entries.length) {
+        const retry = Math.ceil(Math.min(...allCooling.map(item => item.retry_after_ms)) / 1000);
+        res.setHeader('retry-after', String(retry));
+        log('pool_cooldown', { provider: provider.id, skipped: cooling.length, retry_after_seconds: retry });
+      }
+      const allLimited = unavailable.length > 0 && unavailable.every(item => [402, 429].includes(item.status));
       jsonError(res, allLimited ? 429 : 503, 'all_keys_unavailable',
         '当前厂商的所有 API key 均已限额或不可用，请稍后重试，或检查账号额度及 key 状态。',
-        { provider: provider.id, attempts: failures.length, failures });
+        { provider: provider.id, attempts: failures.length, failures, ...(cooling.length ? { cooling_keys: cooling } : {}) });
     } catch {
       jsonError(res, 400, 'request_read_error', '无法完整读取请求。');
     } finally {
@@ -287,6 +336,8 @@ async function main() {
     providers,
     timeoutMs: Number(process.env.UPSTREAM_TIMEOUT_MS || 120000),
     modelsTimeoutMs: Number(process.env.MODELS_TIMEOUT_MS || 10000),
+    keyCooldownMs: Number(process.env.KEY_COOLDOWN_MS ?? 30000),
+    authCooldownMs: Number(process.env.AUTH_COOLDOWN_MS ?? 300000),
     maxBodyBytes: Number(process.env.MAX_BODY_BYTES || 33554432),
     gatewayToken: process.env.GATEWAY_TOKEN || '',
   });

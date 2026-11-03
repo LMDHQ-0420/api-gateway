@@ -103,13 +103,17 @@ Qwen: [X, Y]   → 不受影响
 
 HTTP `401`、`402`、`403`、`408`、`429`、`5xx`，以及连接失败和超时会触发换号；其他响应原样返回。每个请求最多尝试所属池的每个 key 一次。
 
+为减少重复失败带来的等待，HTTP `401` 默认冷却 5 分钟；`402`/`429` 默认冷却 30 秒。仍按 FIFO 使用第一个未冷却的 key，成功不移动；冷却过期后自动恢复候选，不做负载均衡。`401` 对该 key 的所有请求生效，`402`/`429` 按协议、官方接口路径和模型隔离，不会因一个模型限额跳过其他模型或模型列表。官方 `Retry-After` 可以延长冷却，最长 1 小时。
+
+池中所有 key 都在冷却时，直接返回不可用错误和 `Retry-After`，避免再次逐把等待；响应中的 `attempts` 是本次实际尝试次数，`cooling_keys` 只含跳过的 key 编号、历史状态和剩余冷却时间。冷却仅保存在进程内，重启会清空；共享账号在其他客户端的使用无法由网关控制。
+
 全部失败时返回 `error.code: "all_keys_unavailable"`，附带厂商 ID 和失败 key 索引。全部为限额或余额不足时返回 `429`，其余情况返回 `503`，不会包含完整 key。
 
 ## 请求日志
 
 默认向标准输出写入 JSON 行日志，适用于终端、systemd journal 和 Docker 日志。每次请求分配独立的 `request_id`，记录接口、模型、目标厂商/上游主机和路径、协议、池内 key 索引、尝试次数、HTTP 状态和耗时。key 索引是启动时去重后的位置，不是 key 本身。
 
-事件包括 `request_start`、`route_selected`、`upstream_attempt`、`upstream_response`、`key_rotated` 和 `request_end`；模型列表另记录各厂商的结果和模型数量。`response_headers_ms` 是等待上游响应头的时间，`duration_ms` 是整次请求时间，流式请求持续到连接结束。
+事件包括 `request_start`、`route_selected`、`upstream_attempt`、`upstream_response`、`key_rotated` 和 `request_end`；模型列表另记录各厂商的结果和模型数量。`response_headers_ms` 是等待上游响应头的时间，`duration_ms` 是整次请求时间，流式请求持续到连接结束。`request_end.response_headers_ms` 是包含换号重试的总响应头等待时间；`cooldown_skipped` 和 `pool_cooldown` 记录跳过的 key 和整池冷却。
 
 `request_end.outcome` 区分 `success`、`http_error`、`partial_success`（模型列表部分厂商失败）、`client_disconnected` 和 `upstream_interrupted`。成功表示 HTTP 响应完整转发；网关不解析正文中的业务错误或 SSE 事件，因此 HTTP 200 不保证模型业务成功。
 
@@ -134,6 +138,7 @@ journalctl --user -u api-gateway.service -f -o cat
 | `GATEWAY_TOKEN` | 空，可选网关访问口令 |
 | `UPSTREAM_TIMEOUT_MS` | `120000`，每次等待上游数据的超时毫秒数 |
 | `MODELS_TIMEOUT_MS` | `10000`，每个厂商查询列表的总超时毫秒数 |
+| `KEY_COOLDOWN_MS` / `AUTH_COOLDOWN_MS` | `30000` / `300000`，设为 `0` 关闭对应冷却 |
 | `MAX_BODY_BYTES` | `33554432`，即 32 MiB |
 
 编辑 [providers.json](providers.json) 调整官方地址、地域和模型规则。每个厂商配置包含 `id`、`origin`、`basePath`、`keysFile`、`modelPrefixes` 和 `models`。key 路径相对配置文件解析；配置中的精确模型匹配优先，其次是已发现的模型 ID，最后取最长前缀。`models` 用于显式指定模型路由，包括豆包 `ep-...` 接入点 ID，不会直接添加到实时列表。多个厂商返回相同模型 ID 时，依次按显式映射、所属模型前缀、配置顺序选择来源。

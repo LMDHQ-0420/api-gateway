@@ -66,12 +66,12 @@ test('limited key moves to tail, retry uses next, following requests stick to su
   assert.deepEqual(calls.map(item => item.key), ['Bearer a', 'Bearer b', 'Bearer b']);
 });
 
-test('all limited: each key once, structured 429; next request can recover queue head', async t => {
+test('cooldown disabled: each key once, structured 429; next request can recover queue head', async t => {
   let recover = false;
   const { url, calls } = await setup(t, (_req, res) => {
     res.statusCode = recover ? 200 : 429;
     res.end('upstream secret');
-  });
+  }, { keyCooldownMs: 0 });
   const response = await fetch(url);
   assert.equal(response.status, 429);
   const result = await response.json();

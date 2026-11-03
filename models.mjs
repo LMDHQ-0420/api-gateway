@@ -44,7 +44,7 @@ async function queryProvider(provider, queue, request, parentSignal, timeoutMs, 
   const signal = AbortSignal.any([parentSignal, AbortSignal.timeout(timeoutMs)]);
   const seen = new Set();
   let attempt;
-  while (!signal.aborted && (attempt = queue.next(seen))) {
+  while (!signal.aborted && (attempt = queue.next(seen, 'models'))) {
     seen.add(attempt.id);
     const fields = { provider: provider.id, key_index: attempt.id, attempt: seen.size, operation: 'models' };
     log('upstream_attempt', fields);
@@ -84,15 +84,19 @@ async function queryProvider(provider, queue, request, parentSignal, timeoutMs, 
       if (!(error instanceof ListError)) error = new ListError('network_error', 502, true);
       if (signal.aborted) error = new ListError('models_timeout', 504, true);
       if (error.retry) {
-        queue.fail(attempt);
-        log('key_rotated', { ...fields, status: error.status, reason: error.code, action: 'move_to_tail' });
+        const rotation = queue.fail(attempt, { status: error.status });
+        log('key_rotated', { ...fields, status: error.status, reason: error.code, action: rotation ? 'move_to_tail' : 'already_rotated', cooldown_ms: rotation?.cooldown_ms || 0 });
       }
       log('models_attempt_error', { ...fields, status: error.status, error_code: error.code });
       const failure = { provider: provider.id, code: error.code, status: error.status, attempts: seen.size };
       if (!error.retry || signal.aborted) return { provider, error: failure };
-      if (!queue.next(seen)) return { provider, error: failure };
+      if (!queue.next(seen, 'models')) return { provider, error: failure };
     }
   }
+  const cooling = queue.cooling('models', seen);
+  if (cooling.length) return { provider, error: { provider: provider.id, code: 'keys_cooling_down',
+    status: cooling.every(item => [402, 429].includes(item.status)) ? 429 : 503,
+    attempts: seen.size, retry_after_ms: Math.min(...cooling.map(item => item.retry_after_ms)) } };
   return { provider, error: { provider: provider.id, code: 'models_timeout', status: 504, attempts: seen.size } };
 }
 

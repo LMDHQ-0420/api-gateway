@@ -103,13 +103,17 @@ Qwen: [X, Y]   → unaffected
 
 HTTP `401`, `402`, `403`, `408`, `429`, `5xx`, connection failures and timeouts trigger rotation. Other responses pass through unchanged. Each request tries each key in its selected pool at most once.
 
+To avoid repeatedly waiting for known failures, HTTP `401` cools a key for 5 minutes; `402`/`429` cool it for 30 seconds by default. Selection remains FIFO among eligible keys, and success never rotates the head. Keys become eligible again after expiry. Authentication cooling applies across requests; quota cooling is isolated by protocol, official endpoint path, and model, so another model or the model catalog can still use the key. Upstream `Retry-After` may extend cooling, capped at one hour.
+
+When every key is cooling, the gateway immediately returns an unavailable error with `Retry-After`. `attempts` counts actual upstream attempts; `cooling_keys` contains only skipped indexes, previous statuses, and remaining cooldown times. Cooling is process-local and resets on restart. Usage by other clients sharing an account remains outside the gateway's control.
+
 If the pool is exhausted, the gateway returns `error.code: "all_keys_unavailable"`, the provider ID and per-key failure indices. The status is `429` when every failure is quota/balance-related, otherwise `503`. Full keys are never included.
 
 ## Request logs
 
 The gateway writes JSON lines to stdout by default, suitable for terminals, systemd journal, and Docker logs. Each request has a unique `request_id`, with its endpoint, model, provider, upstream host/path, protocol, key index, attempts, HTTP status, and timing. Key indexes refer to the deduplicated pool order at startup, never the key value.
 
-Events include `request_start`, `route_selected`, `upstream_attempt`, `upstream_response`, `key_rotated`, and `request_end`. Model discovery also logs each provider's result and model count. `response_headers_ms` measures time to upstream headers; `duration_ms` measures the full request, including streaming until the connection ends.
+Events include `request_start`, `route_selected`, `upstream_attempt`, `upstream_response`, `key_rotated`, and `request_end`. Model discovery also logs each provider's result and model count. `response_headers_ms` measures time to upstream headers; `duration_ms` measures the full request, including streaming until the connection ends. `request_end.response_headers_ms` measures total time to headers including retries. `cooldown_skipped` and `pool_cooldown` record skipped keys and pool cooldown.
 
 Final outcomes are `success`, `http_error`, `partial_success` (some model catalogs failed), `client_disconnected`, or `upstream_interrupted`. Success means the HTTP response was fully forwarded. Payload-level errors and SSE events are not inspected, so HTTP 200 does not guarantee model-level success.
 
@@ -134,6 +138,7 @@ Copy `.env.example` to `.env` for optional overrides:
 | `GATEWAY_TOKEN` | Empty; optional client access token |
 | `UPSTREAM_TIMEOUT_MS` | `120000` per upstream inactivity interval |
 | `MODELS_TIMEOUT_MS` | `10000` total discovery time per provider |
+| `KEY_COOLDOWN_MS` / `AUTH_COOLDOWN_MS` | `30000` / `300000`; set either to `0` to disable its cooldown |
 | `MAX_BODY_BYTES` | `33554432` (32 MiB) |
 
 Edit [providers.json](providers.json) to change official endpoints, regions or model rules. Each entry defines `id`, `origin`, `basePath`, `keysFile`, `modelPrefixes` and `models`. Key paths are relative to the configuration file. Configured exact model matches take priority, followed by discovered IDs, then the longest prefix. Use `models` for explicit routing overrides, including Doubao endpoint IDs such as `ep-...`; this does not add entries to the live catalog. Duplicate discovered IDs prefer an explicit mapping, then the provider's model prefix, then configuration order.
