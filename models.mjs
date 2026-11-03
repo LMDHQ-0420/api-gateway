@@ -1,3 +1,4 @@
+import { readRetryPolicy } from './retry.mjs';
 import { gunzipSync, inflateSync, brotliDecompressSync } from 'node:zlib';
 
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
@@ -59,8 +60,12 @@ async function queryProvider(provider, queue, request, parentSignal, timeoutMs, 
         log('upstream_response', { ...fields, page: page + 1, status,
           upstream_host: provider.origin.host, response_headers_ms: Math.round(performance.now() - pageStarted) });
         if (status < 200 || status >= 300) {
+          const retry = provider.retryStatuses.includes(status) || status >= 500;
+          const policy = retry ? await readRetryPolicy(response, provider.id, { signal }) : undefined;
           response.destroy();
-          throw new ListError('models_endpoint_error', status, provider.retryStatuses.includes(status) || status >= 500);
+          const error = new ListError('models_endpoint_error', status, retry);
+          error.policy = policy;
+          throw error;
         }
         const list = await readList(response);
         for (const model of list.data) models.set(model.id, model);
@@ -84,8 +89,10 @@ async function queryProvider(provider, queue, request, parentSignal, timeoutMs, 
       if (!(error instanceof ListError)) error = new ListError('network_error', 502, true);
       if (signal.aborted) error = new ListError('models_timeout', 504, true);
       if (error.retry) {
-        const rotation = queue.fail(attempt, { status: error.status });
-        log('key_rotated', { ...fields, status: error.status, reason: error.code, action: rotation ? 'move_to_tail' : 'already_rotated', cooldown_ms: rotation?.cooldown_ms || 0 });
+        const rotation = queue.fail(attempt, { status: error.status, ...error.policy });
+        log('key_rotated', { ...fields, status: error.status, reason: error.code, action: rotation ? 'move_to_tail' : 'already_rotated', cooldown_ms: rotation?.cooldown_ms || 0,
+          ...(error.policy ? { cooldown_reason: error.policy.kind } : {}),
+          ...(error.policy?.official_error_code ? { official_error_code: error.policy.official_error_code } : {}) });
       }
       log('models_attempt_error', { ...fields, status: error.status, error_code: error.code });
       const failure = { provider: provider.id, code: error.code, status: error.status, attempts: seen.size };

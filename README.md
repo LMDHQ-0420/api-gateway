@@ -103,7 +103,7 @@ Qwen: [X, Y]   → unaffected
 
 HTTP `401`, `402`, `403`, `408`, `429`, `5xx`, connection failures and timeouts trigger rotation. Other responses pass through unchanged. Each request tries each key in its selected pool at most once.
 
-To avoid repeatedly waiting for known failures, HTTP `401` cools a key for 5 minutes; `402`/`429` cool it for 30 seconds by default. Selection remains FIFO among eligible keys, and success never rotates the head. Keys become eligible again after expiry. Authentication cooling applies across requests; quota cooling is isolated by protocol, official endpoint path, and model, so another model or the model catalog can still use the key. Upstream `Retry-After` may extend cooling, capped at one hour.
+To avoid repeatedly waiting for known failures, HTTP `401` cools a key for 5 minutes; `402`/`429` cool it for 30 seconds by default. Selection remains FIFO among eligible keys, and success never rotates the head. Keys become eligible again after expiry. Authentication cooling applies across requests; quota cooling is isolated by protocol, official endpoint path, and model, so another model or the model catalog can still use the key. For GLM, `1302` uses a 5-second rate cooldown; `1308`/`1310` use an explicit future reset timestamp (up to 7 days away), or a 15-minute fallback before rechecking. `1113` uses a 1-hour balance cooldown. Only explicit fields or reset-labeled timestamps are accepted; timezone-less GLM Chinese timestamps use UTC+08:00. Ambiguous, past, or overly distant times fall back. Other providers and unknown codes retain generic behavior. Upstream `Retry-After` may extend cooling, with that extension capped at one hour. See [GLM error codes](https://docs.bigmodel.cn/cn/api/api-code).
 
 When every key is cooling, the gateway immediately returns an unavailable error with `Retry-After`. `attempts` counts actual upstream attempts; `cooling_keys` contains only skipped indexes, previous statuses, and remaining cooldown times. Cooling is process-local and resets on restart. Usage by other clients sharing an account remains outside the gateway's control.
 
@@ -116,6 +116,8 @@ The gateway writes JSON lines to stdout by default, suitable for terminals, syst
 Events include `request_start`, `route_selected`, `upstream_attempt`, `upstream_response`, `key_rotated`, and `request_end`. Model discovery also logs each provider's result and model count. `response_headers_ms` measures time to upstream headers; `duration_ms` measures the full request, including streaming until the connection ends. `request_end.response_headers_ms` measures total time to headers including retries. `cooldown_skipped` and `pool_cooldown` record skipped keys and pool cooldown.
 
 Final outcomes are `success`, `http_error`, `partial_success` (some model catalogs failed), `client_disconnected`, or `upstream_interrupted`. Success means the HTTP response was fully forwarded. Payload-level errors and SSE events are not inspected, so HTTP 200 does not guarantee model-level success.
+
+The startup `runtime_config` event reports effective process timeout and cooldown values, including systemd environment overrides. Retry logs expose only allowlisted official error codes, categories, and durations. Error-body inspection is capped at 64 KiB and 250 ms; decompressed data has the same size cap.
 
 Logs exclude request/response bodies, authentication and other request headers, key values, and query strings. Unknown path components, such as file IDs, become `:redacted`. Only the model field is extracted from JSON requests, capped at 200 characters; do not put secrets in model names.
 
@@ -139,6 +141,7 @@ Copy `.env.example` to `.env` for optional overrides:
 | `UPSTREAM_TIMEOUT_MS` | `120000`: hard connection-to-headers deadline per attempt, then data-inactivity timeout |
 | `MODELS_TIMEOUT_MS` | `10000` total discovery time per provider |
 | `KEY_COOLDOWN_MS` / `AUTH_COOLDOWN_MS` | `30000` / `300000`; set either to `0` to disable its cooldown |
+| `RATE_COOLDOWN_MS` / `QUOTA_COOLDOWN_MS` / `BALANCE_COOLDOWN_MS` | `5000` / `900000` / `3600000`; GLM classified cooldowns |
 | `MAX_BODY_BYTES` | `33554432` (32 MiB) |
 
 The response-header deadline includes connection setup and partial headers. After headers arrive, only the data-inactivity timeout applies, allowing healthy long SSE streams. This limit is per attempt; retries can make the overall request longer.

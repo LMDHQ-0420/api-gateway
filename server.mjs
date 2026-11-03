@@ -3,6 +3,7 @@ import https from 'node:https';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { pipeline } from 'node:stream';
+import { readRetryPolicy } from './retry.mjs';
 import { discoverModels } from './models.mjs';
 import { loadProviderDefinitions, prepareProviders, routeRequest, RoutingError } from './routing.mjs';
 
@@ -43,11 +44,11 @@ export function parseKeys(text, { allowEmpty = false } = {}) {
 }
 
 export class KeyQueue {
-  constructor(keys, { cooldownMs = 30_000, authCooldownMs = 300_000, now = Date.now } = {}) {
-    for (const value of [cooldownMs, authCooldownMs]) {
+  constructor(keys, { cooldownMs = 30_000, authCooldownMs = 300_000, rateCooldownMs = 5_000, quotaCooldownMs = 900_000, balanceCooldownMs = 3_600_000, now = Date.now } = {}) {
+    for (const value of [cooldownMs, authCooldownMs, rateCooldownMs, quotaCooldownMs, balanceCooldownMs]) {
       if (!Number.isSafeInteger(value) || value < 0) throw new Error('key 冷却时间必须是非负整数');
     }
-    Object.assign(this, { cooldownMs, authCooldownMs, now });
+    Object.assign(this, { cooldownMs, authCooldownMs, rateCooldownMs, quotaCooldownMs, balanceCooldownMs, now });
     this.entries = [...new Set(keys)].map((key, index) => ({ key, id: index + 1, version: 0, cooldowns: new Map() }));
     if (!this.entries.length) throw new Error('至少需要一个 key');
   }
@@ -71,7 +72,7 @@ export class KeyQueue {
     });
   }
 
-  fail(attempt, { status, retryAfterMs = 0 } = {}) {
+  fail(attempt, { status, retryAfterMs = 0, kind = 'generic', resetAfterMs = 0 } = {}) {
     const index = this.entries.findIndex(item => item.id === attempt.id);
     const entry = this.entries[index];
     // Stale concurrent failures neither rotate again nor extend a newer cooldown.
@@ -79,7 +80,12 @@ export class KeyQueue {
     this.entries.splice(index, 1);
     entry.version++;
     this.entries.push(entry);
-    const configured = status === 401 ? this.authCooldownMs : [402, 429].includes(status) ? this.cooldownMs : 0;
+    let configured = status === 401 ? this.authCooldownMs : [402, 429].includes(status) ? this.cooldownMs : 0;
+    if (configured && status === 429) {
+      if (kind === 'rate_limit') configured = this.rateCooldownMs;
+      else if (kind === 'balance') configured = this.balanceCooldownMs;
+      else if (kind === 'quota') configured = resetAfterMs || this.quotaCooldownMs;
+    }
     const duration = configured ? Math.max(configured, Math.min(3_600_000, retryAfterMs)) : 0;
     if (duration) {
       const scope = status === 401 ? '*' : attempt.scope || '';
@@ -92,12 +98,6 @@ export class KeyQueue {
   }
 }
 
-function retryAfterMs(value) {
-  if (typeof value !== 'string') return 0;
-  const seconds = Number(value);
-  const ms = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(value) - Date.now();
-  return Number.isFinite(ms) ? Math.max(0, Math.min(ms, 3_600_000)) : 0;
-}
 
 function jsonError(res, status, code, message, details = {}) {
   if (res.destroyed || res.headersSent) return;
@@ -160,7 +160,7 @@ function sendUpstream(provider, path, req, body, key, timeoutMs, signal) {
 export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn',
   providers: definitions,
   timeoutMs = 120_000, modelsTimeoutMs = 10_000, maxBodyBytes = 32 * 1024 * 1024, gatewayToken = '',
-  keyCooldownMs = 30_000, authCooldownMs = 300_000,
+  keyCooldownMs = 30_000, authCooldownMs = 300_000, rateCooldownMs = 5_000, quotaCooldownMs = 900_000, balanceCooldownMs = 3_600_000,
   logger = message => console.log(message) }) {
   // 保留原单池 API 供现有集成使用；正常启动通过 providers.json 加载多厂商。
   const legacy = definitions === undefined;
@@ -168,7 +168,7 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
     basePath: '/api/paas/v4', keys }]);
   const queues = new Map(providers.map(provider => {
     const loaded = parseKeys((provider.keys ?? []).join('\n'), { allowEmpty: true });
-    return [provider.id, provider.enabled && loaded.length ? new KeyQueue(loaded, { cooldownMs: keyCooldownMs, authCooldownMs }) : null];
+    return [provider.id, provider.enabled && loaded.length ? new KeyQueue(loaded, { cooldownMs: keyCooldownMs, authCooldownMs, rateCooldownMs, quotaCooldownMs, balanceCooldownMs }) : null];
   }));
   for (const value of [timeoutMs, modelsTimeoutMs, maxBodyBytes]) {
     if (!Number.isSafeInteger(value) || value <= 0) throw new Error('超时和请求大小必须是正整数');
@@ -291,12 +291,14 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
         log('upstream_response', { ...attemptFields, status,
           response_headers_ms: Math.round(performance.now() - attemptStarted) });
         if (provider.retryStatuses.includes(status) || status >= 500) {
-          // 错误正文可能包含敏感信息；聚合错误仅报告索引和 HTTP 状态。
-          upstream.destroy();
-          const rotation = queue.fail(attempt, { status, retryAfterMs: retryAfterMs(upstream.headers['retry-after']) });
+          // Inspect bounded retry errors only; no body or arbitrary error text enters logs.
+          const policy = await readRetryPolicy(upstream, provider.id, { signal: controller.signal });
+          if (controller.signal.aborted) return;
+          const rotation = queue.fail(attempt, { status, ...policy });
           failures.push({ key_index: attempt.id, status });
           log('key_rotated', { ...attemptFields, status, reason: 'http_error',
-            action: rotation ? 'move_to_tail' : 'already_rotated', cooldown_ms: rotation?.cooldown_ms || 0 });
+            action: rotation ? 'move_to_tail' : 'already_rotated', cooldown_ms: rotation?.cooldown_ms || 0,
+            cooldown_reason: policy.kind, ...(policy.official_error_code ? { official_error_code: policy.official_error_code } : {}) });
           continue;
         }
         const headers = cleanHeaders(upstream.headers);
@@ -348,6 +350,9 @@ async function main() {
     modelsTimeoutMs: Number(process.env.MODELS_TIMEOUT_MS || 10000),
     keyCooldownMs: Number(process.env.KEY_COOLDOWN_MS ?? 30000),
     authCooldownMs: Number(process.env.AUTH_COOLDOWN_MS ?? 300000),
+    rateCooldownMs: Number(process.env.RATE_COOLDOWN_MS ?? 5000),
+    quotaCooldownMs: Number(process.env.QUOTA_COOLDOWN_MS ?? 900000),
+    balanceCooldownMs: Number(process.env.BALANCE_COOLDOWN_MS ?? 3600000),
     maxBodyBytes: Number(process.env.MAX_BODY_BYTES || 33554432),
     gatewayToken: process.env.GATEWAY_TOKEN || '',
   });
@@ -355,6 +360,13 @@ async function main() {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT 必须在 1–65535 之间');
   server.listen(port, process.env.HOST || '127.0.0.1', () => {
     console.log(`API gateway listening on ${process.env.HOST || '127.0.0.1'}:${port}`);
+    console.log(JSON.stringify({ event: 'runtime_config', time: new Date().toISOString(),
+      upstream_timeout_ms: Number(process.env.UPSTREAM_TIMEOUT_MS || 120000),
+      key_cooldown_ms: Number(process.env.KEY_COOLDOWN_MS ?? 30000),
+      auth_cooldown_ms: Number(process.env.AUTH_COOLDOWN_MS ?? 300000),
+      rate_cooldown_ms: Number(process.env.RATE_COOLDOWN_MS ?? 5000),
+      quota_cooldown_ms: Number(process.env.QUOTA_COOLDOWN_MS ?? 900000),
+      balance_cooldown_ms: Number(process.env.BALANCE_COOLDOWN_MS ?? 3600000) }));
     for (const provider of providers) {
       console.log(`${provider.id}: ${provider.enabled === false ? 'disabled' : `${provider.keys.length} keys loaded`}`);
     }

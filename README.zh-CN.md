@@ -103,7 +103,7 @@ Qwen: [X, Y]   → 不受影响
 
 HTTP `401`、`402`、`403`、`408`、`429`、`5xx`，以及连接失败和超时会触发换号；其他响应原样返回。每个请求最多尝试所属池的每个 key 一次。
 
-为减少重复失败带来的等待，HTTP `401` 默认冷却 5 分钟；`402`/`429` 默认冷却 30 秒。仍按 FIFO 使用第一个未冷却的 key，成功不移动；冷却过期后自动恢复候选，不做负载均衡。`401` 对该 key 的所有请求生效，`402`/`429` 按协议、官方接口路径和模型隔离，不会因一个模型限额跳过其他模型或模型列表。官方 `Retry-After` 可以延长冷却，最长 1 小时。
+为减少重复失败带来的等待，HTTP `401` 默认冷却 5 分钟；`402`/`429` 默认冷却 30 秒。仍按 FIFO 使用第一个未冷却的 key，成功不移动；冷却过期后自动恢复候选，不做负载均衡。`401` 对该 key 的所有请求生效，`402`/`429` 按协议、官方接口路径和模型隔离，不会因一个模型限额跳过其他模型或模型列表。GLM `1302` 速率限制默认冷却 5 秒；`1308`/`1310` 周期限额使用明确的未来重置时间（最多接受未来 7 天），否则冷却 15 分钟后复查；`1113` 欠费冷却 1 小时后复查。只接受明确字段或重置提示旁的时间戳，GLM 中文无时区时间按 UTC+08:00 解析；过期、模糊或过远的时间使用回退值。其他厂商及未知错误码保留通用规则。官方 `Retry-After` 可以延长冷却，其延长值最多 1 小时。错误码含义见[智谱官方文档](https://docs.bigmodel.cn/cn/api/api-code)。
 
 池中所有 key 都在冷却时，直接返回不可用错误和 `Retry-After`，避免再次逐把等待；响应中的 `attempts` 是本次实际尝试次数，`cooling_keys` 只含跳过的 key 编号、历史状态和剩余冷却时间。冷却仅保存在进程内，重启会清空；共享账号在其他客户端的使用无法由网关控制。
 
@@ -116,6 +116,8 @@ HTTP `401`、`402`、`403`、`408`、`429`、`5xx`，以及连接失败和超时
 事件包括 `request_start`、`route_selected`、`upstream_attempt`、`upstream_response`、`key_rotated` 和 `request_end`；模型列表另记录各厂商的结果和模型数量。`response_headers_ms` 是等待上游响应头的时间，`duration_ms` 是整次请求时间，流式请求持续到连接结束。`request_end.response_headers_ms` 是包含换号重试的总响应头等待时间；`cooldown_skipped` 和 `pool_cooldown` 记录跳过的 key 和整池冷却。
 
 `request_end.outcome` 区分 `success`、`http_error`、`partial_success`（模型列表部分厂商失败）、`client_disconnected` 和 `upstream_interrupted`。成功表示 HTTP 响应完整转发；网关不解析正文中的业务错误或 SSE 事件，因此 HTTP 200 不保证模型业务成功。
+
+启动时的 `runtime_config` 日志显示进程实际使用的超时和冷却值，包含 systemd 环境覆盖后的结果。限额日志只输出白名单官方错误码、冷却类别及时间；错误体最多读取 64 KiB、等待 250 毫秒，压缩解码后同样限制大小。
 
 日志不记录请求/响应正文、认证头、其他请求头、完整 key 或 URL 查询参数；未知路径段（如文件 ID）替换为 `:redacted`。仅从 JSON 请求提取模型名，最多记录 200 字符。模型名仍是日志元数据，请勿在其中填写秘密。
 
@@ -139,6 +141,7 @@ journalctl --user -u api-gateway.service -f -o cat
 | `UPSTREAM_TIMEOUT_MS` | `120000`，每次建连至响应头的硬性上限；响应开始后为数据空闲超时（毫秒） |
 | `MODELS_TIMEOUT_MS` | `10000`，每个厂商查询列表的总超时毫秒数 |
 | `KEY_COOLDOWN_MS` / `AUTH_COOLDOWN_MS` | `30000` / `300000`，设为 `0` 关闭对应冷却 |
+| `RATE_COOLDOWN_MS` / `QUOTA_COOLDOWN_MS` / `BALANCE_COOLDOWN_MS` | `5000` / `900000` / `3600000`，GLM 分级冷却 |
 | `MAX_BODY_BYTES` | `33554432`，即 32 MiB |
 
 编辑 [providers.json](providers.json) 调整官方地址、地域和模型规则。每个厂商配置包含 `id`、`origin`、`basePath`、`keysFile`、`modelPrefixes` 和 `models`。key 路径相对配置文件解析；配置中的精确模型匹配优先，其次是已发现的模型 ID，最后取最长前缀。`models` 用于显式指定模型路由，包括豆包 `ep-...` 接入点 ID，不会直接添加到实时列表。多个厂商返回相同模型 ID 时，依次按显式映射、所属模型前缀、配置顺序选择来源。
