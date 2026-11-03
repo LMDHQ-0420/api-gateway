@@ -133,16 +133,26 @@ function sendUpstream(provider, path, req, body, key, timeoutMs, signal) {
     else headers.authorization = `Bearer ${key}`;
     headers['content-length'] = String(body.length);
     const transport = origin.protocol === 'https:' ? https : http;
+    let deadline;
     const upstream = transport.request({
       protocol: origin.protocol, hostname: origin.hostname, port: origin.port,
       method: req.method, path, headers, signal,
-    }, resolve);
-    upstream.on('error', reject);
-    upstream.setTimeout(timeoutMs, () => {
+    }, response => {
+      clearTimeout(deadline);
+      resolve(response);
+    });
+    const expire = () => {
       const error = new Error('Upstream timeout');
       error.code = 'ETIMEDOUT';
       upstream.destroy(error);
-    });
+    };
+    // Socket inactivity alone does not bound DNS/connect/TLS or partial headers.
+    // Clear the wall-clock deadline at headers so healthy long SSE streams survive.
+    deadline = setTimeout(expire, timeoutMs);
+    deadline.unref();
+    upstream.once('error', error => { clearTimeout(deadline); reject(error); });
+    upstream.once('close', () => clearTimeout(deadline));
+    upstream.setTimeout(timeoutMs, expire);
     upstream.end(body);
   });
 }

@@ -136,10 +136,12 @@ Copy `.env.example` to `.env` for optional overrides:
 | `HOST` / `PORT` | `127.0.0.1` / `3000` |
 | `PROVIDERS_FILE` | `providers.json` |
 | `GATEWAY_TOKEN` | Empty; optional client access token |
-| `UPSTREAM_TIMEOUT_MS` | `120000` per upstream inactivity interval |
+| `UPSTREAM_TIMEOUT_MS` | `120000`: hard connection-to-headers deadline per attempt, then data-inactivity timeout |
 | `MODELS_TIMEOUT_MS` | `10000` total discovery time per provider |
 | `KEY_COOLDOWN_MS` / `AUTH_COOLDOWN_MS` | `30000` / `300000`; set either to `0` to disable its cooldown |
 | `MAX_BODY_BYTES` | `33554432` (32 MiB) |
+
+The response-header deadline includes connection setup and partial headers. After headers arrive, only the data-inactivity timeout applies, allowing healthy long SSE streams. This limit is per attempt; retries can make the overall request longer.
 
 Edit [providers.json](providers.json) to change official endpoints, regions or model rules. Each entry defines `id`, `origin`, `basePath`, `keysFile`, `modelPrefixes` and `models`. Key paths are relative to the configuration file. Configured exact model matches take priority, followed by discovered IDs, then the longest prefix. Use `models` for explicit routing overrides, including Doubao endpoint IDs such as `ep-...`; this does not add entries to the live catalog. Duplicate discovered IDs prefer an explicit mapping, then the provider's model prefix, then configuration order.
 
