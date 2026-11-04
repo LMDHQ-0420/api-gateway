@@ -17,7 +17,7 @@
 
 ## 快速开始
 
-需要 **Node.js 22.9+**。
+需要 **Node.js 22.21+ (24.x: 24.5+)**。
 
 ```bash
 git clone git@github.com:LMDHQ-0420/api-gateway.git
@@ -113,7 +113,7 @@ HTTP `401`、`402`、`403`、`408`、`429`、`5xx`，以及连接失败和超时
 
 默认向标准输出写入 JSON 行日志，适用于终端、systemd journal 和 Docker 日志。每次请求分配独立的 `request_id`，记录接口、模型、目标厂商/上游主机和路径、协议、池内 key 索引、尝试次数、HTTP 状态和耗时。key 索引是启动时去重后的位置，不是 key 本身。
 
-事件包括 `request_start`、`route_selected`、`upstream_attempt`、`upstream_response`、`key_rotated` 和 `request_end`；模型列表另记录各厂商的结果和模型数量。`response_headers_ms` 是等待上游响应头的时间，`duration_ms` 是整次请求时间，流式请求持续到连接结束。`request_end.response_headers_ms` 是包含换号重试的总响应头等待时间；`cooldown_skipped` 和 `pool_cooldown` 记录跳过的 key 和整池冷却。
+事件包括 `request_start`、`route_selected`、`upstream_attempt`、`upstream_response`、`key_rotated` 和 `request_end`；模型列表另记录各厂商的结果和模型数量。`response_headers_ms` 是等待上游响应头的时间，`duration_ms` 是整次请求时间，流式请求持续到连接结束。`request_end.response_headers_ms` 是包含换号重试的总响应头等待时间；`first_byte_ms` 是首个响应字节，`first_content_ms` 是首个可识别 SSE 内容片段（含文字、思考或工具参数），并非一定是首个答案文字。压缩或非 SSE 响应只计首字节。`upstream_response.transport` 记录连接复用、上传结束和响应头等阶段时间；`cooldown_skipped` 和 `pool_cooldown` 记录跳过的 key 和整池冷却。
 
 `request_end.outcome` 区分 `success`、`http_error`、`partial_success`（模型列表部分厂商失败）、`client_disconnected` 和 `upstream_interrupted`。成功表示 HTTP 响应完整转发；网关不解析正文中的业务错误或 SSE 事件，因此 HTTP 200 不保证模型业务成功。
 
@@ -139,6 +139,8 @@ journalctl --user -u api-gateway.service -f -o cat
 | `PROVIDERS_FILE` | `providers.json` |
 | `GATEWAY_TOKEN` | 空，可选网关访问口令 |
 | `UPSTREAM_TIMEOUT_MS` | `120000`，每次建连至响应头的硬性上限；响应开始后为数据空闲超时（毫秒） |
+| `UPSTREAM_KEEPALIVE_MS` | `60000`，独立连接池的空闲复用时间，尊重官方更短的提示 |
+| `UPSTREAM_PROXY_URL` | 空，使用系统路由；可选无认证的 HTTP(S) 本机出口 |
 | `MODELS_TIMEOUT_MS` | `10000`，每个厂商查询列表的总超时毫秒数 |
 | `KEY_COOLDOWN_MS` / `AUTH_COOLDOWN_MS` | `30000` / `300000`，设为 `0` 关闭对应冷却 |
 | `RATE_COOLDOWN_MS` / `QUOTA_COOLDOWN_MS` / `BALANCE_COOLDOWN_MS` | `5000` / `900000` / `3600000`，GLM 分级冷却 |
@@ -149,6 +151,16 @@ journalctl --user -u api-gateway.service -f -o cat
 其他选项包括 `messagesBasePath`（包含 `/v1` 的完整前缀）、`messagesAuth`（默认沿用 `auth`）、`modelsPath`（默认 `<basePath>/models`）、`enabled`、`nativePrefixes`、`auth`（`bearer` 或 `x-api-key`）、默认 `headers` 和 `retryStatuses`。新增厂商条目后运行 `npm run init-keys` 即可创建新池。官方地址需与 key 的地域和套餐匹配；统一入口使用 GLM Coding Plan 时，需相应修改 GLM 的 `basePath`。
 
 启用 `GATEWAY_TOKEN` 后，客户端使用 `Authorization: Bearer <口令>` 或 Claude 的 `x-api-key`。key 文件和 `.env` 已加入 Git 忽略规则，自定义 key 文件位置也应加入 `.gitignore`。旧版根目录 `keys.txt` 仅在 GLM 专属文件为空时作为回退。
+
+### Linux 物理网卡直连（可选）
+
+主服务仅依赖 Node.js 内置模块。若系统 TUN 接管了默认路由，可用附带的 Python 3 标准库适配器，让官方 HTTPS 请求的 DNS 和 TCP 都绑定物理网卡，无需关闭其他应用的代理：
+
+```bash
+python3 scripts/direct-egress.py --interface <物理网卡> --dns-server <该网络的DNS服务器> --providers-file providers.json
+```
+
+然后设置 `UPSTREAM_PROXY_URL=http://127.0.0.1:39081` 并重启网关。这是仅监听本机的 CONNECT 转发：只允许配置中的 HTTPS 官方地址，不经过远端代理，不解密 TLS、不读取 key。需要 Linux 允许 `SO_BINDTODEVICE`，目前仅支持 IPv4；DNS 按 TTL 缓存，接口或网络 DNS 变化后需更新启动参数。容器应连接宿主机的可达地址，而非容器自身的 `127.0.0.1`。其他部署留空该选项即可。
 
 ## Docker
 
@@ -175,4 +187,4 @@ docker run -d --name api-gateway --restart unless-stopped \
 npm test
 ```
 
-测试使用本地模拟厂商，不需要真实 key，不调用付费接口。
+测试使用本地模拟厂商，不需要真实 key，不调用付费接口。可选 Linux 直连测试需要 Python 3；TLS 隧道测试在有 OpenSSL 时运行，临时证书不会提交。

@@ -58,7 +58,7 @@ async function queryProvider(provider, queue, request, parentSignal, timeoutMs, 
         const response = await request(provider, path, attempt.key, signal);
         const status = response.statusCode;
         log('upstream_response', { ...fields, page: page + 1, status,
-          upstream_host: provider.origin.host, response_headers_ms: Math.round(performance.now() - pageStarted) });
+          upstream_host: provider.origin.host, transport: response.gatewayTiming, response_headers_ms: Math.round(performance.now() - pageStarted) });
         if (status < 200 || status >= 300) {
           const retry = provider.retryStatuses.includes(status) || status >= 500;
           const policy = retry ? await readRetryPolicy(response, provider.id, { signal }) : undefined;

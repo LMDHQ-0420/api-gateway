@@ -3,6 +3,8 @@ import https from 'node:https';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { pipeline } from 'node:stream';
+import { createUpstreamAgents } from './transport.mjs';
+import { observeResponse } from './observe.mjs';
 import { readRetryPolicy } from './retry.mjs';
 import { discoverModels } from './models.mjs';
 import { loadProviderDefinitions, prepareProviders, routeRequest, RoutingError } from './routing.mjs';
@@ -118,7 +120,7 @@ function authorized(header, token) {
   return expected.length === actual.length && timingSafeEqual(expected, actual);
 }
 
-function sendUpstream(provider, path, req, body, key, timeoutMs, signal) {
+function sendUpstream(provider, path, req, body, key, timeoutMs, signal, agents) {
   return new Promise((resolve, reject) => {
     const { origin } = provider;
     const headers = cleanHeaders(req.headers);
@@ -133,14 +135,30 @@ function sendUpstream(provider, path, req, body, key, timeoutMs, signal) {
     else headers.authorization = `Bearer ${key}`;
     headers['content-length'] = String(body.length);
     const transport = origin.protocol === 'https:' ? https : http;
+    const began = performance.now();
+    const timing = {};
+    const elapsed = () => Math.round(performance.now() - began);
     let deadline;
     const upstream = transport.request({
       protocol: origin.protocol, hostname: origin.hostname, port: origin.port,
-      method: req.method, path, headers, signal,
+      method: req.method, path, headers, signal, agent: agents[origin.protocol === 'https:' ? 'https' : 'http'],
     }, response => {
       clearTimeout(deadline);
+      timing.reused_socket = upstream.reusedSocket;
+      timing.headers_ms = elapsed();
+      timing.wait_after_upload_ms = Math.max(0, timing.headers_ms - (timing.request_sent_ms ?? timing.headers_ms));
+      response.gatewayTiming = timing;
       resolve(response);
     });
+    upstream.once('socket', socket => {
+      timing.socket_assigned_ms = elapsed();
+      if (socket.connecting) {
+        socket.once('lookup', () => { timing.dns_ready_ms = elapsed(); });
+        socket.once('connect', () => { timing.tcp_connected_ms = elapsed(); });
+        if (origin.protocol === 'https:') socket.once('secureConnect', () => { timing.tls_ready_ms = elapsed(); });
+      }
+    });
+    upstream.once('finish', () => { timing.request_sent_ms = elapsed(); });
     const expire = () => {
       const error = new Error('Upstream timeout');
       error.code = 'ETIMEDOUT';
@@ -161,6 +179,7 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
   providers: definitions,
   timeoutMs = 120_000, modelsTimeoutMs = 10_000, maxBodyBytes = 32 * 1024 * 1024, gatewayToken = '',
   keyCooldownMs = 30_000, authCooldownMs = 300_000, rateCooldownMs = 5_000, quotaCooldownMs = 900_000, balanceCooldownMs = 3_600_000,
+  proxyUrl = '', keepAliveMs = 60_000,
   logger = message => console.log(message) }) {
   // 保留原单池 API 供现有集成使用；正常启动通过 providers.json 加载多厂商。
   const legacy = definitions === undefined;
@@ -173,7 +192,8 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
   for (const value of [timeoutMs, modelsTimeoutMs, maxBodyBytes]) {
     if (!Number.isSafeInteger(value) || value <= 0) throw new Error('超时和请求大小必须是正整数');
   }
-  return http.createServer(async (req, res) => {
+  const agents = createUpstreamAgents({ proxyUrl, keepAliveMs });
+  const server = http.createServer(async (req, res) => {
     const started = performance.now();
     const requestId = randomUUID();
     const state = { method: req.method, path: logPath(req.url || ''), attempts: 0 };
@@ -226,6 +246,7 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
         chunks.push(chunk);
       }
       const body = Buffer.concat(chunks);
+      state.request_body_ms = Math.round(performance.now() - started);
       state.model = requestModel(body, req.headers);
       const pathname = req.url.split('?')[0];
       if (!legacy && req.method === 'GET' && pathname === '/v1/models') {
@@ -233,7 +254,7 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
         const catalog = await discoverModels({ providers, queues, signal: controller.signal, timeoutMs: modelsTimeoutMs, log,
           request: (provider, path, key, signal) => sendUpstream(provider, path, {
             method: 'GET', headers: { accept: 'application/json', 'accept-encoding': 'identity' },
-          }, Buffer.alloc(0), key, modelsTimeoutMs, signal),
+          }, Buffer.alloc(0), key, modelsTimeoutMs, signal, agents),
         });
         if (controller.signal.aborted) return;
         state.protocol = 'models';
@@ -278,7 +299,7 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
         log('upstream_attempt', attemptFields);
         let upstream;
         try {
-          upstream = await sendUpstream(upstreamProvider, path, req, body, attempt.key, timeoutMs, controller.signal);
+          upstream = await sendUpstream(upstreamProvider, path, req, body, attempt.key, timeoutMs, controller.signal, agents);
         } catch (error) {
           if (controller.signal.aborted) return;
           queue.fail(attempt);
@@ -289,7 +310,7 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
         }
         const status = upstream.statusCode;
         log('upstream_response', { ...attemptFields, status,
-          response_headers_ms: Math.round(performance.now() - attemptStarted) });
+          response_headers_ms: Math.round(performance.now() - attemptStarted), transport: upstream.gatewayTiming });
         if (provider.retryStatuses.includes(status) || status >= 500) {
           // Inspect bounded retry errors only; no body or arbitrary error text enters logs.
           const policy = await readRetryPolicy(upstream, provider.id, { signal: controller.signal });
@@ -306,6 +327,9 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
         // 直接转发原始字节，包括压缩内容和 SSE；背压及断开交由 pipeline 处理。
         state.response_headers_ms = Math.round(performance.now() - started);
         state.stream = (headers['content-type'] || '').includes('text/event-stream');
+        const isIdentity = !headers['content-encoding'] || headers['content-encoding'] === 'identity';
+        Object.defineProperty(state, 'inspect_sse', { value: state.stream && isIdentity, enumerable: false });
+        if (state.stream) headers['x-accel-buffering'] ??= 'no';
         res.writeHead(status, headers);
         res.flushHeaders();
         upstream.once('aborted', () => {
@@ -315,7 +339,7 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
             log('key_rotated', { ...attemptFields, reason: 'upstream_interrupted', action: 'move_to_tail' });
           }
         });
-        pipeline(upstream, res, () => {
+        pipeline(upstream, observeResponse(state, started, log), res, () => {
           res.removeListener('close', cancel);
         });
         return;
@@ -338,6 +362,8 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
       if (!res.headersSent || res.writableEnded) res.removeListener('close', cancel);
     }
   });
+  server.once('close', () => { agents.http.destroy(); agents.https.destroy(); });
+  return server;
 }
 
 async function main() {
@@ -355,6 +381,8 @@ async function main() {
     balanceCooldownMs: Number(process.env.BALANCE_COOLDOWN_MS ?? 3600000),
     maxBodyBytes: Number(process.env.MAX_BODY_BYTES || 33554432),
     gatewayToken: process.env.GATEWAY_TOKEN || '',
+    proxyUrl: process.env.UPSTREAM_PROXY_URL || '',
+    keepAliveMs: Number(process.env.UPSTREAM_KEEPALIVE_MS || 60000),
   });
   const port = Number(process.env.PORT || 3000);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT 必须在 1–65535 之间');
@@ -362,6 +390,8 @@ async function main() {
     console.log(`API gateway listening on ${process.env.HOST || '127.0.0.1'}:${port}`);
     console.log(JSON.stringify({ event: 'runtime_config', time: new Date().toISOString(),
       upstream_timeout_ms: Number(process.env.UPSTREAM_TIMEOUT_MS || 120000),
+      upstream_proxy_enabled: Boolean(process.env.UPSTREAM_PROXY_URL),
+      upstream_keepalive_ms: Number(process.env.UPSTREAM_KEEPALIVE_MS || 60000),
       key_cooldown_ms: Number(process.env.KEY_COOLDOWN_MS ?? 30000),
       auth_cooldown_ms: Number(process.env.AUTH_COOLDOWN_MS ?? 300000),
       rate_cooldown_ms: Number(process.env.RATE_COOLDOWN_MS ?? 5000),

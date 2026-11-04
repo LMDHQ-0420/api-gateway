@@ -5,3 +5,5 @@
 !providers.json
 !models.mjs
 !retry.mjs
+!transport.mjs
+!observe.mjs

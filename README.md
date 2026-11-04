@@ -17,7 +17,7 @@ A lightweight gateway that routes requests to official model providers. Each pro
 
 ## Quick start
 
-Requires **Node.js 22.9+**.
+Requires **Node.js 22.21+ (24.x: 24.5+)**.
 
 ```bash
 git clone git@github.com:LMDHQ-0420/api-gateway.git
@@ -113,7 +113,7 @@ If the pool is exhausted, the gateway returns `error.code: "all_keys_unavailable
 
 The gateway writes JSON lines to stdout by default, suitable for terminals, systemd journal, and Docker logs. Each request has a unique `request_id`, with its endpoint, model, provider, upstream host/path, protocol, key index, attempts, HTTP status, and timing. Key indexes refer to the deduplicated pool order at startup, never the key value.
 
-Events include `request_start`, `route_selected`, `upstream_attempt`, `upstream_response`, `key_rotated`, and `request_end`. Model discovery also logs each provider's result and model count. `response_headers_ms` measures time to upstream headers; `duration_ms` measures the full request, including streaming until the connection ends. `request_end.response_headers_ms` measures total time to headers including retries. `cooldown_skipped` and `pool_cooldown` record skipped keys and pool cooldown.
+Events include `request_start`, `route_selected`, `upstream_attempt`, `upstream_response`, `key_rotated`, and `request_end`. Model discovery also logs each provider's result and model count. `response_headers_ms` measures time to upstream headers; `duration_ms` measures the full request, including streaming until the connection ends. `request_end.response_headers_ms` measures total time to headers including retries. `first_byte_ms` measures the first body byte; `first_content_ms` observes the first recognized SSE text, thinking, or tool delta, which is not necessarily answer text. Compressed and non-SSE responses only expose first-byte timing. `upstream_response.transport` records reuse, upload completion, and response-header phases. `cooldown_skipped` and `pool_cooldown` record skipped keys and pool cooldown.
 
 Final outcomes are `success`, `http_error`, `partial_success` (some model catalogs failed), `client_disconnected`, or `upstream_interrupted`. Success means the HTTP response was fully forwarded. Payload-level errors and SSE events are not inspected, so HTTP 200 does not guarantee model-level success.
 
@@ -139,6 +139,8 @@ Copy `.env.example` to `.env` for optional overrides:
 | `PROVIDERS_FILE` | `providers.json` |
 | `GATEWAY_TOKEN` | Empty; optional client access token |
 | `UPSTREAM_TIMEOUT_MS` | `120000`: hard connection-to-headers deadline per attempt, then data-inactivity timeout |
+| `UPSTREAM_KEEPALIVE_MS` | `60000`; dedicated idle connection reuse, honoring shorter server hints |
+| `UPSTREAM_PROXY_URL` | Empty for system routing; optional credential-free HTTP(S) local egress |
 | `MODELS_TIMEOUT_MS` | `10000` total discovery time per provider |
 | `KEY_COOLDOWN_MS` / `AUTH_COOLDOWN_MS` | `30000` / `300000`; set either to `0` to disable its cooldown |
 | `RATE_COOLDOWN_MS` / `QUOTA_COOLDOWN_MS` / `BALANCE_COOLDOWN_MS` | `5000` / `900000` / `3600000`; GLM classified cooldowns |
@@ -151,6 +153,16 @@ Edit [providers.json](providers.json) to change official endpoints, regions or m
 Additional options include `messagesBasePath` (full prefix including `/v1`), `messagesAuth` (defaults to `auth`), `modelsPath` (defaults to `<basePath>/models`), `enabled`, `nativePrefixes`, `auth` (`bearer` or `x-api-key`), default `headers` and `retryStatuses`. Add another entry and run `npm run init-keys` to create a new provider pool. Match the official endpoint to your key's region and plan. For GLM Coding Plan on the unified route, change GLM's `basePath` accordingly.
 
 With `GATEWAY_TOKEN` enabled, clients use `Authorization: Bearer <token>` or Claude's `x-api-key`. Key files and `.env` are Git-ignored; add custom key-file locations to `.gitignore` too. Legacy root `keys.txt` remains a GLM fallback when its dedicated file is empty.
+
+### Optional Linux physical-interface egress
+
+The main gateway uses only Node.js built-ins. If a system TUN captures default routes, the optional Python 3 standard-library adapter pins both DNS and TCP to a physical interface:
+
+```bash
+python3 scripts/direct-egress.py --interface <physical-interface> --dns-server <network-DNS-server> --providers-file providers.json
+```
+
+Set `UPSTREAM_PROXY_URL=http://127.0.0.1:39081` and restart the gateway. This loopback-only CONNECT relay allows configured HTTPS origins, uses no remote proxy, and never decrypts TLS or reads keys. Linux must permit `SO_BINDTODEVICE`; only IPv4 is supported. DNS follows TTL, and interface/DNS changes require updating its arguments. Containers must use a reachable host address instead of their own loopback. Leave this setting empty for other deployments.
 
 ## Docker
 

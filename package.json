@@ -3,7 +3,7 @@
   "version": "2.2.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22.9" },
+  "engines": { "node": ">=22.21" },
   "scripts": {
     "init-keys": "node --env-file-if-exists=.env scripts/init-keys.mjs",
     "start": "node --env-file-if-exists=.env server.mjs",
