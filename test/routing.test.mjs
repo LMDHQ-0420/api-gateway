@@ -8,7 +8,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { createGateway, parseKeys } from '../server.mjs';
-import { prepareProviders, routeRequest, loadProviderDefinitions } from '../routing.mjs';
+import { prepareProviders, routeRequest, inspectRequest, loadProviderDefinitions } from '../routing.mjs';
 
 const examples = JSON.parse(await readFile(new URL('../providers.json', import.meta.url), 'utf8')).providers;
 const jsonHeaders = { 'content-type': 'application/json' };
@@ -245,4 +245,27 @@ test('key initialization preserves existing files and never prints their content
   assert.equal(await readFile(join(dir, 'keys/glm.txt'), 'utf8'), existing);
   assert.match(await readFile(join(dir, 'keys/qwen.txt'), 'utf8'), /^# qwen:/);
   assert.ok(!stdout.includes(existing.trim()) && !stderr.includes(existing.trim()));
+});
+
+test('shared inspection preserves routing validation and scoped byte passthrough', async t => {
+  const providers = prepareProviders([definition('glm', 'http://127.0.0.1')]);
+  for (const body of [Buffer.from('{'), Buffer.from('{"model":[]}'), payload('glm-test')]) {
+    const metadata = inspectRequest(jsonHeaders, body);
+    const result = shared => {
+      try { const route = routeRequest('/v1/chat/completions', jsonHeaders, body, providers, shared); return route.provider.id; }
+      catch (error) { return error.code; }
+    };
+    assert.equal(result(metadata), result(undefined));
+    assert.equal(routeRequest('/providers/glm/v1/messages', jsonHeaders, body,
+      prepareProviders([definition('glm', 'http://127.0.0.1', { messagesBasePath: '/v1' })]), metadata).protocol, 'anthropic');
+  }
+  const official = await mock(t);
+  const url = await gateway(t, [definition('glm', official.origin)]);
+  const body = Buffer.from('{"model":"glm-test","messages":[{"role":"user","content":"' + '历史上下文'.repeat(100_000) + '"}]}');
+  const response = await fetch(url + '/v1/chat/completions', { method: 'POST', headers: jsonHeaders, body });
+  assert.equal(await response.text(), 'ok');
+  assert.deepEqual(official.calls[0].body, body);
+  const opaque = Buffer.from('{invalid JSON');
+  await (await fetch(url + '/providers/glm/v1/chat/completions', { method: 'POST', headers: jsonHeaders, body: opaque })).text();
+  assert.deepEqual(official.calls[1].body, opaque);
 });

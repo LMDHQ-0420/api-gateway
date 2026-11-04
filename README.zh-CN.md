@@ -113,7 +113,7 @@ HTTP `401`、`402`、`403`、`408`、`429`、`5xx`，以及连接失败和超时
 
 默认向标准输出写入 JSON 行日志，适用于终端、systemd journal 和 Docker 日志。每次请求分配独立的 `request_id`，记录接口、模型、目标厂商/上游主机和路径、协议、池内 key 索引、尝试次数、HTTP 状态和耗时。key 索引是启动时去重后的位置，不是 key 本身。
 
-事件包括 `request_start`、`route_selected`、`upstream_attempt`、`upstream_response`、`key_rotated` 和 `request_end`；模型列表另记录各厂商的结果和模型数量。`response_headers_ms` 是等待上游响应头的时间，`duration_ms` 是整次请求时间，流式请求持续到连接结束。`request_end.response_headers_ms` 是包含换号重试的总响应头等待时间；`first_byte_ms` 是首个响应字节，`first_content_ms` 是首个可识别 SSE 内容片段（含文字、思考或工具参数），并非一定是首个答案文字。压缩或非 SSE 响应只计首字节。`upstream_response.transport` 记录连接复用、上传结束和响应头等阶段时间；`cooldown_skipped` 和 `pool_cooldown` 记录跳过的 key 和整池冷却。
+事件包括 `request_start`、`route_selected`、`upstream_attempt`、`upstream_response`、`key_rotated` 和 `request_end`；模型列表另记录各厂商的结果和模型数量。`response_headers_ms` 是等待上游响应头的时间，`duration_ms` 是整次请求时间，流式请求持续到连接结束。`request_end.response_headers_ms` 是包含换号重试的总响应头等待时间；`first_byte_ms` 是首个响应字节，`first_content_ms` 是首个可识别 SSE 内容片段（含文字、思考或工具参数），并非一定是首个答案文字。压缩或非 SSE 响应只计首字节。`request_bytes` 是请求体字节数，`request_body_ms` 包含接收和缓存请求体的时间；`routing_ms` 是缓存完成后的 JSON 解析与路由选择耗时，不含上游处理。日志和路由共用一次 JSON 解析。`upstream_response.transport` 记录连接复用、上传结束和响应头等阶段时间；`cooldown_skipped` 和 `pool_cooldown` 记录跳过的 key 和整池冷却。
 
 `request_end.outcome` 区分 `success`、`http_error`、`partial_success`（模型列表部分厂商失败）、`client_disconnected` 和 `upstream_interrupted`。成功表示 HTTP 响应完整转发；网关不解析正文中的业务错误或 SSE 事件，因此 HTTP 200 不保证模型业务成功。
 

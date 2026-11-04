@@ -134,7 +134,19 @@ function routeProviderPath(provider, path, query, preserveNative = false) {
     ? provider.basePath + path.slice(3) + query : path + query };
 }
 
-export function routeRequest(rawUrl, headers, body, providers) {
+// Keep only routing metadata; never retain a parsed conversation during streaming.
+export function inspectRequest(headers, body) {
+  if (!body.length || !/(?:^|\/)json(?:\s*;|$)|\+json(?:\s*;|$)/i.test(headers['content-type'] || '')) return {};
+  let model;
+  try { model = JSON.parse(body.toString('utf8'))?.model; }
+  catch { return { error: 'invalid_json' }; }
+  if (model !== undefined && (typeof model !== 'string' || !model.trim())) {
+    return { model: typeof model === 'string' ? model : undefined, error: 'invalid_model' };
+  }
+  return { model };
+}
+
+export function routeRequest(rawUrl, headers, body, providers, metadata) {
   const queryIndex = rawUrl.indexOf('?');
   const path = queryIndex < 0 ? rawUrl : rawUrl.slice(0, queryIndex);
   const query = queryIndex < 0 ? '' : rawUrl.slice(queryIndex);
@@ -151,16 +163,9 @@ export function routeRequest(rawUrl, headers, body, providers) {
   const native = selectUnique(enabled.filter(provider => provider.nativePrefixes.some(prefix =>
     path === prefix || path.startsWith(prefix + '/')) || (provider.messagesBasePath &&
       provider.messagesBasePath !== '/v1' && messagePath(path, provider.messagesBasePath))), 'ambiguous_path');
-  let model;
-  if (body.length && /(?:^|\/)json(?:\s*;|$)|\+json(?:\s*;|$)/i.test(headers['content-type'] || '')) {
-    let data;
-    try { data = JSON.parse(body.toString('utf8')); }
-    catch { throw new RoutingError(400, 'invalid_json', '请求体不是有效 JSON。'); }
-    model = data?.model;
-    if (model !== undefined && (typeof model !== 'string' || !model.trim())) {
-      throw new RoutingError(400, 'invalid_model', 'model 必须是非空字符串。');
-    }
-  }
+  const { model, error } = metadata ?? inspectRequest(headers, body);
+  if (error === 'invalid_json') throw new RoutingError(400, error, '请求体不是有效 JSON。');
+  if (error === 'invalid_model') throw new RoutingError(400, error, 'model 必须是非空字符串。');
   const matched = model ? modelProvider(model, enabled) : undefined;
   if (native && matched && native !== matched) {
     throw new RoutingError(400, 'provider_path_mismatch', '模型所属厂商与官方路径不一致；自动分流请使用 /v1/ 路径。');

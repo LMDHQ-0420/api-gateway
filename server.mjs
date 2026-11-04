@@ -7,7 +7,7 @@ import { createUpstreamAgents } from './transport.mjs';
 import { observeResponse } from './observe.mjs';
 import { readRetryPolicy } from './retry.mjs';
 import { discoverModels } from './models.mjs';
-import { loadProviderDefinitions, prepareProviders, routeRequest, RoutingError } from './routing.mjs';
+import { loadProviderDefinitions, prepareProviders, routeRequest, inspectRequest, RoutingError } from './routing.mjs';
 
 const HOP_HEADERS = new Set([
   'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
@@ -19,14 +19,6 @@ const LOG_PATH_PARTS = new Set(('api paas coding anthropic apps compatible compa
 function logPath(path) {
   return path.split('?')[0].split('/').slice(0, 16)
     .map(part => !part || LOG_PATH_PARTS.has(part) ? part : ':redacted').join('/');
-}
-
-function requestModel(body, headers) {
-  if (!/(?:^|\/)json(?:\s*;|$)|\+json(?:\s*;|$)/i.test(headers['content-type'] || '')) return undefined;
-  try {
-    const model = JSON.parse(body.toString('utf8'))?.model;
-    return typeof model === 'string' ? model.slice(0, 200) : undefined;
-  } catch { return undefined; }
 }
 
 function cleanHeaders(headers) {
@@ -155,7 +147,10 @@ function sendUpstream(provider, path, req, body, key, timeoutMs, signal, agents)
       if (socket.connecting) {
         socket.once('lookup', () => { timing.dns_ready_ms = elapsed(); });
         socket.once('connect', () => { timing.tcp_connected_ms = elapsed(); });
-        if (origin.protocol === 'https:') socket.once('secureConnect', () => { timing.tls_ready_ms = elapsed(); });
+      }
+      // CONNECT agents can return a TLS socket after TCP is already connected.
+      if (origin.protocol === 'https:' && !upstream.reusedSocket) {
+        socket.once('secureConnect', () => { timing.tls_ready_ms = elapsed(); });
       }
     });
     upstream.once('finish', () => { timing.request_sent_ms = elapsed(); });
@@ -245,9 +240,13 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
         }
         chunks.push(chunk);
       }
-      const body = Buffer.concat(chunks);
+      const body = chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, size);
+      chunks.length = 0;
       state.request_body_ms = Math.round(performance.now() - started);
-      state.model = requestModel(body, req.headers);
+      state.request_bytes = size;
+      const routingStarted = performance.now();
+      const metadata = inspectRequest(req.headers, body);
+      state.model = metadata.model?.slice(0, 200);
       const pathname = req.url.split('?')[0];
       if (!legacy && req.method === 'GET' && pathname === '/v1/models') {
         state.protocol = 'models';
@@ -267,11 +266,13 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
       }
       let route;
       try {
-        route = legacy ? { provider: providers[0], path: req.url } : routeRequest(req.url, req.headers, body, providers);
+        route = legacy ? { provider: providers[0], path: req.url } : routeRequest(req.url, req.headers, body, providers, metadata);
       } catch (error) {
+        state.routing_ms = Number((performance.now() - routingStarted).toFixed(3));
         if (!(error instanceof RoutingError)) throw error;
         return jsonError(res, error.status, error.code, error.message, error.details);
       }
+      state.routing_ms = Number((performance.now() - routingStarted).toFixed(3));
       const { provider, path } = route;
       Object.assign(state, { provider: provider.id, protocol: route.protocol || 'openai',
         upstream_host: provider.origin.host, upstream_path: logPath(path) });

@@ -34,6 +34,7 @@ test('success logs route, key index, status and timing without payloads, headers
   assert.equal(end.protocol, 'openai'); assert.equal(end.key_index, 1);
   assert.equal(end.status, 200); assert.equal(end.outcome, 'success');
   assert.equal(end.attempts, 1); assert.ok(end.duration_ms >= 0);
+  assert.ok(end.request_bytes > 0); assert.ok(end.routing_ms >= 0);
   assert.equal(new Set(logs.map(log => log.request_id)).size, 1);
   for (const secret of ['PRIVATE_KEY', 'CLIENT_SECRET', 'HEADER_SECRET', 'COOKIE_SECRET', 'PROMPT_SECRET', 'RESPONSE_SECRET', 'QUERY_SECRET']) {
     assert.ok(!JSON.stringify(logs).includes(secret), secret);
