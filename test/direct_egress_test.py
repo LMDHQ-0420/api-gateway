@@ -4,15 +4,16 @@ import socket
 import struct
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+from concurrent.futures import ThreadPoolExecutor
 
 spec = importlib.util.spec_from_file_location('direct_egress', Path(__file__).parents[1] / 'scripts/direct-egress.py')
 egress = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(egress)
 
 
-def packet(transaction=42, flags=0x8180, address='39.106.105.100'):
-    question = b'\x04open\x08bigmodel\x02cn\0' + struct.pack('!HH', 1, 1)
+def packet(transaction=42, flags=0x8180, address='39.106.105.100', hostname='open.bigmodel.cn'):
+    question = b''.join(bytes([len(label)]) + label.encode() for label in hostname.split('.')) + b'\0' + struct.pack('!HH', 1, 1)
     answer = b'\xc0\x0c' + struct.pack('!HHIH', 1, 1, 5, 4) + socket.inet_aton(address)
     return struct.pack('!6H', transaction, flags, 1, 1, 0, 0) + question + answer
 
@@ -49,6 +50,57 @@ class DirectEgressTests(unittest.TestCase):
             for _ in range(2):
                 with self.assertRaises(OSError):
                     resolver.resolve('open.bigmodel.cn')
+            self.assertEqual(constructor.call_count, 1)
+
+    def test_dns_slow_provider_does_not_block_another_provider(self):
+        resolver = egress.Resolver('eth-test', '127.0.0.1')
+        entered, release = threading.Event(), threading.Event()
+        def make_socket(*_args):
+            context = MagicMock()
+            sock = context.__enter__.return_value
+            def answer(_size):
+                query = sock.send.call_args.args[0]
+                hostname, _ = egress.read_name(query, 12)
+                if hostname == 'slow.test':
+                    entered.set()
+                    if not release.wait(2):
+                        raise OSError('test lookup not released')
+                return packet(transaction=struct.unpack_from('!H', query)[0], hostname=hostname)
+            sock.recv.side_effect = answer
+            return context
+        with patch.object(egress.socket, 'socket', side_effect=make_socket) as constructor:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                slow = pool.submit(resolver.resolve, 'slow.test')
+                self.assertTrue(entered.wait(1))
+                try:
+                    fast = pool.submit(resolver.resolve, 'fast.test')
+                    self.assertEqual(fast.result(timeout=1), ['39.106.105.100'])
+                    self.assertEqual(resolver.resolve('fast.test'), ['39.106.105.100'])
+                finally:
+                    release.set()
+                self.assertEqual(slow.result(timeout=1), ['39.106.105.100'])
+            self.assertEqual(constructor.call_count, 2)
+
+    def test_simultaneous_same_host_lookups_share_one_dns_query(self):
+        resolver = egress.Resolver('eth-test', '127.0.0.1')
+        entered, release = threading.Event(), threading.Event()
+        with patch.object(egress.socket, 'socket') as constructor:
+            sock = constructor.return_value.__enter__.return_value
+            def answer(_size):
+                entered.set()
+                if not release.wait(2):
+                    raise OSError('test lookup not released')
+                query = sock.send.call_args.args[0]
+                return packet(transaction=struct.unpack_from('!H', query)[0])
+            sock.recv.side_effect = answer
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                futures = [pool.submit(resolver.resolve, 'open.bigmodel.cn') for _ in range(8)]
+                try:
+                    self.assertTrue(entered.wait(1))
+                finally:
+                    release.set()
+                for future in futures:
+                    self.assertEqual(future.result(timeout=1), ['39.106.105.100'])
             self.assertEqual(constructor.call_count, 1)
 
     def test_forward_preserves_large_binary_bytes_and_fin(self):

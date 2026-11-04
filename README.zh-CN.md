@@ -160,7 +160,7 @@ journalctl --user -u api-gateway.service -f -o cat
 python3 scripts/direct-egress.py --interface <物理网卡> --dns-server <该网络的DNS服务器> --providers-file providers.json
 ```
 
-然后设置 `UPSTREAM_PROXY_URL=http://127.0.0.1:39081` 并重启网关。这是仅监听本机的 CONNECT 转发：只允许配置中的 HTTPS 官方地址，不经过远端代理，不解密 TLS、不读取 key。需要 Linux 允许 `SO_BINDTODEVICE`，目前仅支持 IPv4；DNS 按 TTL 缓存，接口或网络 DNS 变化后需更新启动参数。容器应连接宿主机的可达地址，而非容器自身的 `127.0.0.1`。其他部署留空该选项即可。
+然后设置 `UPSTREAM_PROXY_URL=http://127.0.0.1:39081` 并重启网关。这是仅监听本机的 CONNECT 转发：只允许配置中的 HTTPS 官方地址，不经过远端代理，不解密 TLS、不读取 key。需要 Linux 允许 `SO_BINDTODEVICE`，目前仅支持 IPv4；DNS 按 TTL 缓存，同域名并发查询合并，不同域名独立解析；监听队列采用系统允许的连接积压量，减少突发建连等待。接口或网络 DNS 变化后需更新启动参数。容器应连接宿主机的可达地址，而非容器自身的 `127.0.0.1`。其他部署留空该选项即可。
 
 ## Docker
 

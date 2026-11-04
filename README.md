@@ -162,7 +162,7 @@ The main gateway uses only Node.js built-ins. If a system TUN captures default r
 python3 scripts/direct-egress.py --interface <physical-interface> --dns-server <network-DNS-server> --providers-file providers.json
 ```
 
-Set `UPSTREAM_PROXY_URL=http://127.0.0.1:39081` and restart the gateway. This loopback-only CONNECT relay allows configured HTTPS origins, uses no remote proxy, and never decrypts TLS or reads keys. Linux must permit `SO_BINDTODEVICE`; only IPv4 is supported. DNS follows TTL, and interface/DNS changes require updating its arguments. Containers must use a reachable host address instead of their own loopback. Leave this setting empty for other deployments.
+Set `UPSTREAM_PROXY_URL=http://127.0.0.1:39081` and restart the gateway. This loopback-only CONNECT relay allows configured HTTPS origins, uses no remote proxy, and never decrypts TLS or reads keys. Linux must permit `SO_BINDTODEVICE`; only IPv4 is supported. DNS follows TTL and coalesces lookups per hostname, so a slow lookup does not block other providers. The listener uses the system connection backlog to absorb connection bursts. Interface/DNS changes require updating its arguments. Containers must use a reachable host address instead of their own loopback. Leave this setting empty for other deployments.
 
 ## Docker
 

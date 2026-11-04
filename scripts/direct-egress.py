@@ -90,6 +90,7 @@ class Resolver:
         self.dns_server = dns_server
         self.cache = {}
         self.lock = threading.Lock()
+        self.host_locks = {}
 
     def bind(self, sock):
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, self.interface.encode() + b'\0')
@@ -99,7 +100,11 @@ class Resolver:
             return [str(ipaddress.IPv4Address(hostname))]
         except ValueError:
             pass
+        # Only requests for the same hostname share DNS work. A slow provider's
+        # DNS lookup must not delay another provider, even on a cache hit.
         with self.lock:
+            host_lock = self.host_locks.setdefault(hostname, threading.Lock())
+        with host_lock:
             cached = self.cache.get(hostname)
             if cached and cached[0] > time.monotonic():
                 if cached[1] is None:
@@ -234,6 +239,9 @@ class Handler(socketserver.BaseRequestHandler):
 class Server(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
+    # The stdlib default of five queued accepts causes SYN retries during cold
+    # connection bursts, even when the relay and upstream have spare capacity.
+    request_queue_size = socket.SOMAXCONN
 
 
 def main():
