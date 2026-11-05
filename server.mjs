@@ -393,13 +393,17 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
       }
       const cooling = queue.cooling(scope, seen);
       const unavailable = [...failures, ...cooling];
+      // Invalid credentials do not turn an otherwise capacity-limited pool
+      // into a server failure. Keep 503 for all-auth or real transport/5xx faults.
+      const actionable = unavailable.filter(item => item.status !== 401);
+      const allLimited = actionable.length > 0 && actionable.every(item => [402, 429].includes(item.status));
       const allCooling = queue.cooling(scope);
       if (allCooling.length === queue.entries.length) {
-        const retry = Math.ceil(Math.min(...allCooling.map(item => item.retry_after_ms)) / 1000);
+        const retryKeys = allLimited ? allCooling.filter(item => item.status !== 401) : allCooling;
+        const retry = Math.ceil(Math.min(...retryKeys.map(item => item.retry_after_ms)) / 1000);
         res.setHeader('retry-after', String(retry));
         log('pool_cooldown', { provider: provider.id, skipped: cooling.length, retry_after_seconds: retry });
       }
-      const allLimited = unavailable.length > 0 && unavailable.every(item => [402, 429].includes(item.status));
       jsonError(res, allLimited ? 429 : 503, 'all_keys_unavailable',
         '当前厂商的所有 API key 均已限额或不可用，请稍后重试，或检查账号额度及 key 状态。',
         { provider: provider.id, attempts: failures.length, failures, ...(cooling.length ? { cooling_keys: cooling } : {}) });

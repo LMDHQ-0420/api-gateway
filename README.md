@@ -151,6 +151,8 @@ Normal requests remain concurrent, without a fixed per-key concurrency cap or an
 
 `upstream_attempt.in_flight` reports the key's active requests inside this gateway, including complete response streams. Recovery attempts carry `recovery_probe`; completed recoveries emit `key_recovered`. Transport failures expose phase timing (`waiting_headers` or `upload_or_connection`), without payloads or credentials.
 
+Invalid credentials do not turn capacity exhaustion into a server fault: if remaining failures are all 402/429, pool exhaustion returns 429; when every key is cooling, `Retry-After` uses the earliest non-auth cooldown. All-auth failures or mixed transport/upstream server faults retain 503.
+
 The response-header deadline includes connection setup and partial headers. After headers arrive, only the data-inactivity timeout applies, allowing healthy long SSE streams. This limit is per attempt; retries can make the overall request longer.
 
 Edit [providers.json](providers.json) to change official endpoints, regions or model rules. Each entry defines `id`, `origin`, `basePath`, `keysFile`, `modelPrefixes` and `models`. Key paths are relative to the configuration file. Configured exact model matches take priority, followed by discovered IDs, then the longest prefix. Use `models` for explicit routing overrides, including Doubao endpoint IDs such as `ep-...`; this does not add entries to the live catalog. Duplicate discovered IDs prefer an explicit mapping, then the provider's model prefix, then configuration order.

@@ -151,6 +151,8 @@ journalctl --user -u api-gateway.service -f -o cat
 
 `upstream_attempt.in_flight` 记录该 key 在网关内的在途数量，包含完整响应流；恢复尝试带 `recovery_probe` 标记，恢复完成记录 `key_recovered`。传输错误日志新增阶段计时，区分 `waiting_headers` 与 `upload_or_connection`，不记录正文或认证信息。
 
+认证失败的 key 不会把其余账号的容量不足误判为服务器故障：其余失败均为 402/429 时，全池不可用返回 429，整池冷却时 `Retry-After` 按非认证失败 key 的最早恢复时间计算。全部认证失败或混合传输/上游服务器错误仍返回 503。
+
 编辑 [providers.json](providers.json) 调整官方地址、地域和模型规则。每个厂商配置包含 `id`、`origin`、`basePath`、`keysFile`、`modelPrefixes` 和 `models`。key 路径相对配置文件解析；配置中的精确模型匹配优先，其次是已发现的模型 ID，最后取最长前缀。`models` 用于显式指定模型路由，包括豆包 `ep-...` 接入点 ID，不会直接添加到实时列表。多个厂商返回相同模型 ID 时，依次按显式映射、所属模型前缀、配置顺序选择来源。
 
 其他选项包括 `messagesBasePath`（包含 `/v1` 的完整前缀）、`messagesAuth`（默认沿用 `auth`）、`modelsPath`（默认 `<basePath>/models`）、`enabled`、`nativePrefixes`、`auth`（`bearer` 或 `x-api-key`）、默认 `headers` 和 `retryStatuses`。新增厂商条目后运行 `npm run init-keys` 即可创建新池。官方地址需与 key 的地域和套餐匹配；统一入口使用 GLM Coding Plan 时，需相应修改 GLM 的 `basePath`。
