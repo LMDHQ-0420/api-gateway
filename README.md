@@ -144,7 +144,12 @@ Copy `.env.example` to `.env` for optional overrides:
 | `MODELS_TIMEOUT_MS` | `10000` total discovery time per provider |
 | `KEY_COOLDOWN_MS` / `AUTH_COOLDOWN_MS` | `30000` / `300000`; set either to `0` to disable its cooldown |
 | `RATE_COOLDOWN_MS` / `QUOTA_COOLDOWN_MS` / `BALANCE_COOLDOWN_MS` | `5000` / `900000` / `3600000`; GLM classified cooldowns |
+| `RECOVERY_PROBE_MS` | `60000`; soft quota/balance cooldown recovery interval in milliseconds; `0` disables |
 | `MAX_BODY_BYTES` | `33554432` (32 MiB) |
+
+Normal requests remain concurrent, without a fixed per-key concurrency cap or an added waiting queue. Successful requests keep using the FIFO head; official errors or transport failures still trigger rotation. For GLM soft quota/balance cooldowns without an official retry/reset deadline, one real request may try recovery only when no normal key is eligible; no synthetic background inference is sent. Each provider allows one recovery attempt in flight and spaces starts by at least `min(15000, RECOVERY_PROBE_MS)` milliseconds; each key also observes `RECOVERY_PROBE_MS`. A fully forwarded 2xx clears only the matching model/protocol/endpoint cooldown and preserves FIFO ordering. Authentication errors and explicit official deadlines are never probed early; HTTP 2xx does not guarantee a successful response-body business result.
+
+`upstream_attempt.in_flight` reports the key's active requests inside this gateway, including complete response streams. Recovery attempts carry `recovery_probe`; completed recoveries emit `key_recovered`. Transport failures expose phase timing (`waiting_headers` or `upload_or_connection`), without payloads or credentials.
 
 The response-header deadline includes connection setup and partial headers. After headers arrive, only the data-inactivity timeout applies, allowing healthy long SSE streams. This limit is per attempt; retries can make the overall request longer.
 

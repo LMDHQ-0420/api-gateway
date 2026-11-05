@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { pipeline } from 'node:stream';
 import { createUpstreamAgents } from './transport.mjs';
 import { observeResponse } from './observe.mjs';
+import { Attempts } from './attempts.mjs';
 import { readRetryPolicy } from './retry.mjs';
 import { discoverModels } from './models.mjs';
 import { loadProviderDefinitions, prepareProviders, routeRequest, inspectRequest, RoutingError } from './routing.mjs';
@@ -38,11 +39,11 @@ export function parseKeys(text, { allowEmpty = false } = {}) {
 }
 
 export class KeyQueue {
-  constructor(keys, { cooldownMs = 30_000, authCooldownMs = 300_000, rateCooldownMs = 5_000, quotaCooldownMs = 900_000, balanceCooldownMs = 3_600_000, now = Date.now } = {}) {
-    for (const value of [cooldownMs, authCooldownMs, rateCooldownMs, quotaCooldownMs, balanceCooldownMs]) {
+  constructor(keys, { cooldownMs = 30_000, authCooldownMs = 300_000, rateCooldownMs = 5_000, quotaCooldownMs = 900_000, balanceCooldownMs = 3_600_000, recoveryProbeMs = 60_000, now = Date.now } = {}) {
+    for (const value of [cooldownMs, authCooldownMs, rateCooldownMs, quotaCooldownMs, balanceCooldownMs, recoveryProbeMs]) {
       if (!Number.isSafeInteger(value) || value < 0) throw new Error('key 冷却时间必须是非负整数');
     }
-    Object.assign(this, { cooldownMs, authCooldownMs, rateCooldownMs, quotaCooldownMs, balanceCooldownMs, now });
+    Object.assign(this, { cooldownMs, authCooldownMs, rateCooldownMs, quotaCooldownMs, balanceCooldownMs, recoveryProbeMs, now });
     this.entries = [...new Set(keys)].map((key, index) => ({ key, id: index + 1, version: 0, cooldowns: new Map() }));
     if (!this.entries.length) throw new Error('至少需要一个 key');
   }
@@ -56,6 +57,24 @@ export class KeyQueue {
   next(seen, scope = '') {
     const entry = this.entries.find(item => !seen.has(item.id) && !this.blocked(item, scope));
     return entry && { ...entry, scope };
+  }
+
+  nextRecovery(seen, scope = '') {
+    const entry = this.entries.find(item => {
+      if (seen.has(item.id)) return false;
+      const failure = this.blocked(item, scope);
+      return failure && !item.cooldowns.has('*') && !failure.probing && this.now() >= failure.probeAfter;
+    });
+    return entry && { ...entry, scope, recovery: entry.cooldowns.get(scope) };
+  }
+
+  recovered(attempt) {
+    const entry = this.entries.find(e => e.id === attempt.id);
+    if (!attempt.recovery || !entry || entry.version !== attempt.version ||
+        entry.cooldowns.get(attempt.scope) !== attempt.recovery) return false;
+    entry.cooldowns.delete(attempt.scope);
+    entry.version++;
+    return true;
   }
 
   cooling(scope = '', seen = new Set()) {
@@ -86,7 +105,11 @@ export class KeyQueue {
       if (entry.cooldowns.size >= 64 && !entry.cooldowns.has(scope)) {
         entry.cooldowns.delete(entry.cooldowns.keys().next().value);
       }
-      entry.cooldowns.set(scope, { status, until: this.now() + duration });
+      // Official Retry-After/reset deadlines and auth cooldowns are never probed early.
+      const canProbe = this.recoveryProbeMs && ['balance', 'quota'].includes(kind) &&
+        !retryAfterMs && !resetAfterMs && status === 429;
+      entry.cooldowns.set(scope, { status, until: this.now() + duration,
+        probeAfter: canProbe ? this.now() + this.recoveryProbeMs : Infinity });
     }
     return { cooldown_ms: duration };
   }
@@ -163,7 +186,12 @@ function sendUpstream(provider, path, req, body, key, timeoutMs, signal, agents)
     // Clear the wall-clock deadline at headers so healthy long SSE streams survive.
     deadline = setTimeout(expire, timeoutMs);
     deadline.unref();
-    upstream.once('error', error => { clearTimeout(deadline); reject(error); });
+    upstream.once('error', error => {
+      clearTimeout(deadline);
+      error.gatewayTiming = { ...timing, elapsed_ms: elapsed(),
+        phase: timing.request_sent_ms === undefined ? 'upload_or_connection' : 'waiting_headers' };
+      reject(error);
+    });
     upstream.once('close', () => clearTimeout(deadline));
     upstream.setTimeout(timeoutMs, expire);
     upstream.end(body);
@@ -174,6 +202,7 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
   providers: definitions,
   timeoutMs = 120_000, modelsTimeoutMs = 10_000, maxBodyBytes = 32 * 1024 * 1024, gatewayToken = '',
   keyCooldownMs = 30_000, authCooldownMs = 300_000, rateCooldownMs = 5_000, quotaCooldownMs = 900_000, balanceCooldownMs = 3_600_000,
+  recoveryProbeMs = 60_000,
   proxyUrl = '', keepAliveMs = 60_000,
   logger = message => console.log(message) }) {
   // 保留原单池 API 供现有集成使用；正常启动通过 providers.json 加载多厂商。
@@ -182,11 +211,13 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
     basePath: '/api/paas/v4', keys }]);
   const queues = new Map(providers.map(provider => {
     const loaded = parseKeys((provider.keys ?? []).join('\n'), { allowEmpty: true });
-    return [provider.id, provider.enabled && loaded.length ? new KeyQueue(loaded, { cooldownMs: keyCooldownMs, authCooldownMs, rateCooldownMs, quotaCooldownMs, balanceCooldownMs }) : null];
+    return [provider.id, provider.enabled && loaded.length ? new KeyQueue(loaded, { cooldownMs: keyCooldownMs, authCooldownMs, rateCooldownMs, quotaCooldownMs, balanceCooldownMs, recoveryProbeMs }) : null];
   }));
   for (const value of [timeoutMs, modelsTimeoutMs, maxBodyBytes]) {
     if (!Number.isSafeInteger(value) || value <= 0) throw new Error('超时和请求大小必须是正整数');
   }
+  const attempts = new Map([...queues].filter(([, queue]) => queue).map(([id, queue]) =>
+    [id, new Attempts(queue, { recoveryProbeMs })]));
   const agents = createUpstreamAgents({ proxyUrl, keepAliveMs });
   const server = http.createServer(async (req, res) => {
     const started = performance.now();
@@ -228,6 +259,8 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
     const cancel = () => controller.abort();
     res.once('close', cancel);
     const failures = [];
+    let activeLease;
+    let streaming = false;
     try {
       const chunks = [];
       let size = 0;
@@ -290,14 +323,18 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
       const seen = new Set();
       const skipped = queue.cooling(scope);
       if (skipped.length) log('cooldown_skipped', { provider: provider.id, keys: skipped.map(item => item.key_index) });
-      let attempt;
-      while (!controller.signal.aborted && (attempt = queue.next(seen, scope))) {
+      const tracker = attempts.get(provider.id);
+      let lease;
+      while (!controller.signal.aborted && (lease = tracker.next(seen, scope))) {
+        activeLease = lease;
+        const { attempt } = lease;
         seen.add(attempt.id);
         state.attempts = seen.size;
         state.key_index = attempt.id;
         const attemptStarted = performance.now();
         const attemptFields = { provider: provider.id, key_index: attempt.id, attempt: seen.size };
-        log('upstream_attempt', attemptFields);
+        log('upstream_attempt', { ...attemptFields, in_flight: lease.inFlight,
+          ...(attempt.recovery ? { recovery_probe: true } : {}) });
         let upstream;
         try {
           upstream = await sendUpstream(upstreamProvider, path, req, body, attempt.key, timeoutMs, controller.signal, agents);
@@ -306,7 +343,8 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
           queue.fail(attempt);
           failures.push({ key_index: attempt.id, reason: error.code === 'ETIMEDOUT' ? 'timeout' : 'network_error' });
           log('key_rotated', { ...attemptFields, reason: error.code === 'ETIMEDOUT' ? 'timeout' : 'network_error',
-            action: 'move_to_tail', duration_ms: Math.round(performance.now() - attemptStarted) });
+            action: 'move_to_tail', duration_ms: Math.round(performance.now() - attemptStarted), transport: error.gatewayTiming });
+          lease.release(); activeLease = null;
           continue;
         }
         const status = upstream.statusCode;
@@ -321,6 +359,7 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
           log('key_rotated', { ...attemptFields, status, reason: 'http_error',
             action: rotation ? 'move_to_tail' : 'already_rotated', cooldown_ms: rotation?.cooldown_ms || 0,
             cooldown_reason: policy.kind, ...(policy.official_error_code ? { official_error_code: policy.official_error_code } : {}) });
+          lease.release(); activeLease = null;
           continue;
         }
         const headers = cleanHeaders(upstream.headers);
@@ -340,9 +379,16 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
             log('key_rotated', { ...attemptFields, reason: 'upstream_interrupted', action: 'move_to_tail' });
           }
         });
-        pipeline(upstream, observeResponse(state, started, log), res, () => {
+        // Capture this lease, not the retry loop variable that can be reassigned.
+        const responseLease = lease;
+        pipeline(upstream, observeResponse(state, started, log), res, error => {
+          if (!error && res.writableFinished && status >= 200 && status < 300 && queue.recovered(attempt)) {
+            log('key_recovered', { ...attemptFields, protocol: state.protocol });
+          }
+          responseLease.release();
           res.removeListener('close', cancel);
         });
+        streaming = true;
         return;
       }
       const cooling = queue.cooling(scope, seen);
@@ -360,6 +406,7 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
     } catch {
       jsonError(res, 400, 'request_read_error', '无法完整读取请求。');
     } finally {
+      if (!streaming) activeLease?.release();
       if (!res.headersSent || res.writableEnded) res.removeListener('close', cancel);
     }
   });
@@ -382,6 +429,7 @@ async function main() {
     balanceCooldownMs: Number(process.env.BALANCE_COOLDOWN_MS ?? 3600000),
     maxBodyBytes: Number(process.env.MAX_BODY_BYTES || 33554432),
     gatewayToken: process.env.GATEWAY_TOKEN || '',
+    recoveryProbeMs: Number(process.env.RECOVERY_PROBE_MS ?? 60000),
     proxyUrl: process.env.UPSTREAM_PROXY_URL || '',
     keepAliveMs: Number(process.env.UPSTREAM_KEEPALIVE_MS || 60000),
   });
@@ -393,6 +441,7 @@ async function main() {
       upstream_timeout_ms: Number(process.env.UPSTREAM_TIMEOUT_MS || 120000),
       upstream_proxy_enabled: Boolean(process.env.UPSTREAM_PROXY_URL),
       upstream_keepalive_ms: Number(process.env.UPSTREAM_KEEPALIVE_MS || 60000),
+      recovery_probe_ms: Number(process.env.RECOVERY_PROBE_MS ?? 60000),
       key_cooldown_ms: Number(process.env.KEY_COOLDOWN_MS ?? 30000),
       auth_cooldown_ms: Number(process.env.AUTH_COOLDOWN_MS ?? 300000),
       rate_cooldown_ms: Number(process.env.RATE_COOLDOWN_MS ?? 5000),

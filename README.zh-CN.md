@@ -144,7 +144,12 @@ journalctl --user -u api-gateway.service -f -o cat
 | `MODELS_TIMEOUT_MS` | `10000`，每个厂商查询列表的总超时毫秒数 |
 | `KEY_COOLDOWN_MS` / `AUTH_COOLDOWN_MS` | `30000` / `300000`，设为 `0` 关闭对应冷却 |
 | `RATE_COOLDOWN_MS` / `QUOTA_COOLDOWN_MS` / `BALANCE_COOLDOWN_MS` | `5000` / `900000` / `3600000`，GLM 分级冷却 |
+| `RECOVERY_PROBE_MS` | `60000`，软性额度/余额冷却复核间隔毫秒数；`0` 关闭 |
 | `MAX_BODY_BYTES` | `33554432`，即 32 MiB |
+
+正常请求保持并发直发，不设置每 key 的固定并发上限，也不增加等待队列；成功继续使用队首，仍仅在官方错误或传输失败时换号。GLM 软性额度/余额冷却没有官方明确重试或重置时间时，仅在没有正常可选 key 时允许一个真实请求尝试恢复，不额外发送后台付费请求。每个厂商最多一个恢复尝试在途，启动间隔至少 `min(15000, RECOVERY_PROBE_MS)` 毫秒；同一 key 还须满足 `RECOVERY_PROBE_MS`。完整转发 2xx 后仅解除对应模型/协议/接口的冷却，保持队列顺序。认证失败及官方明确时间不提前复核，HTTP 2xx 不保证正文业务成功。
+
+`upstream_attempt.in_flight` 记录该 key 在网关内的在途数量，包含完整响应流；恢复尝试带 `recovery_probe` 标记，恢复完成记录 `key_recovered`。传输错误日志新增阶段计时，区分 `waiting_headers` 与 `upload_or_connection`，不记录正文或认证信息。
 
 编辑 [providers.json](providers.json) 调整官方地址、地域和模型规则。每个厂商配置包含 `id`、`origin`、`basePath`、`keysFile`、`modelPrefixes` 和 `models`。key 路径相对配置文件解析；配置中的精确模型匹配优先，其次是已发现的模型 ID，最后取最长前缀。`models` 用于显式指定模型路由，包括豆包 `ep-...` 接入点 ID，不会直接添加到实时列表。多个厂商返回相同模型 ID 时，依次按显式映射、所属模型前缀、配置顺序选择来源。
 
