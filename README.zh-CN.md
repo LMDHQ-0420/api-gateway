@@ -444,6 +444,8 @@ journalctl --user -u api-gateway.service -f -o cat
 
 厂商定义在 [providers.json](providers.json)，`keysFile` 相对该配置文件解析。配置 `id`、`origin`、`basePath`、`models`、`modelPrefixes`，以及可选的 `messagesBasePath`、`messagesAuth`、`modelsPath`、`nativePrefixes`、`auth`、`headers`、`retryStatuses`、`enabled`。`models` 用于精确路由，包括 `ep-...` 等接入点 ID，不填充实时模型目录。新增厂商后运行 `npm run init-keys` 初始化文件；私有地址覆盖值可放在单独忽略的配置中，并由 `PROVIDERS_FILE` 指向。
 
+厂商可通过 `proxyUrl` 单独覆盖 `UPSTREAM_PROXY_URL`：空字符串表示该厂商直连，省略则继承网关设置，模型发现与推理均生效。客制上游地址和凭据应保存在单独忽略的本地配置与 key 文件中，不要修改公开厂商定义中的官方地址。HTTP 上游没有 TLS 加密，会明文传输凭据及内容；服务支持时应使用 HTTPS。直连仍可能经过系统 TUN 路由。
+
 ## 部署与网络访问
 
 `npm start` 会加载 `.env`；持久运行请使用 systemd、Docker 等进程管理方式。内网访问需监听可达网卡，例如设置 `HOST=0.0.0.0`，客户端填写服务端内网地址；主机防火墙及 WSL/Windows 端口转发也需放行，单独修改 `HOST` 不会自动建立转发。示例 3000 是项目默认端口，不保证与你部署中的实际端口相同。

@@ -444,6 +444,8 @@ Copy [.env.example](.env.example) to `.env`. Values below are defaults; service-
 
 Provider definitions live in [providers.json](providers.json). `keysFile` is relative to that config file. Configure `id`, `origin`, `basePath`, `models`, `modelPrefixes`, and optionally `messagesBasePath`, `messagesAuth`, `modelsPath`, `nativePrefixes`, `auth`, `headers`, `retryStatuses`, and `enabled`. `models` controls exact routing, including endpoint IDs such as `ep-...`; it does not populate the live catalog. Add a provider, then run `npm run init-keys` to initialize its file. Use a separate ignored config for private endpoint overrides and point `PROVIDERS_FILE` to it.
 
+A provider may set `proxyUrl` to override `UPSTREAM_PROXY_URL`; an empty string selects a direct connection for that provider, while omission inherits the gateway setting. This applies to both model discovery and inference. Keep custom upstream addresses and credentials in a separately ignored local configuration and key file; do not replace official URLs in the public provider definitions. HTTP upstreams transmit credentials and payloads without TLS; use HTTPS when the service supports it. A direct connection can still follow system TUN routes.
+
 ## Deployment and network access
 
 `npm start` loads `.env`; use a process manager such as systemd or Docker for persistence. To expose the gateway to a LAN, listen on a reachable interface (for example `HOST=0.0.0.0`) and use the server's LAN address in clients. The host firewall and any WSL/Windows forwarding must also allow the selected port; changing `HOST` alone does not establish forwarding. Example port 3000 is the project default, not a promise about a deployment's actual port.

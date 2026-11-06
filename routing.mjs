@@ -43,6 +43,17 @@ export function prepareProviders(definitions) {
     if (typeof modelsPath !== 'string' || !modelsPath.startsWith('/') || modelsPath.startsWith('//') || /[#\\\r\n]/.test(modelsPath)) {
       throw new Error(`厂商 ${id} 的 modelsPath 必须是官方模型列表的绝对路径`);
     }
+    if (definition.proxyUrl !== undefined) {
+      if (typeof definition.proxyUrl !== 'string') throw new Error(`厂商 ${id} 的 proxyUrl 必须是字符串`);
+      if (definition.proxyUrl) {
+        let proxy;
+        try { proxy = new URL(definition.proxyUrl); } catch { throw new Error(`厂商 ${id} 的 proxyUrl 无效`); }
+        if (!['http:', 'https:'].includes(proxy.protocol) || proxy.username || proxy.password ||
+            proxy.pathname !== '/' || proxy.search || proxy.hash) {
+          throw new Error(`厂商 ${id} 的 proxyUrl 必须是无认证信息的 HTTP(S) 代理地址`);
+        }
+      }
+    }
     const nativePrefixes = strings(definition.nativePrefixes ?? [], 'nativePrefixes');
     if (!nativePrefixes.every(validPath)) throw new Error(`厂商 ${id} 的 nativePrefixes 配置无效`);
     const headers = definition.headers ?? {};

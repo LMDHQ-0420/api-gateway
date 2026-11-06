@@ -219,6 +219,14 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
   const attempts = new Map([...queues].filter(([, queue]) => queue).map(([id, queue]) =>
     [id, new Attempts(queue, { recoveryProbeMs })]));
   const agents = createUpstreamAgents({ proxyUrl, keepAliveMs });
+  const providerAgents = new Map();
+  const agentsFor = provider => {
+    if (provider.proxyUrl === undefined || provider.proxyUrl === proxyUrl) return agents;
+    if (!providerAgents.has(provider.id)) {
+      providerAgents.set(provider.id, createUpstreamAgents({ proxyUrl: provider.proxyUrl, keepAliveMs }));
+    }
+    return providerAgents.get(provider.id);
+  };
   const server = http.createServer(async (req, res) => {
     const started = performance.now();
     const requestId = randomUUID();
@@ -286,7 +294,7 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
         const catalog = await discoverModels({ providers, queues, signal: controller.signal, timeoutMs: modelsTimeoutMs, log,
           request: (provider, path, key, signal) => sendUpstream(provider, path, {
             method: 'GET', headers: { accept: 'application/json', 'accept-encoding': 'identity' },
-          }, Buffer.alloc(0), key, modelsTimeoutMs, signal, agents),
+          }, Buffer.alloc(0), key, modelsTimeoutMs, signal, agentsFor(provider)),
         });
         if (controller.signal.aborted) return;
         state.protocol = 'models';
@@ -337,7 +345,7 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
           ...(attempt.recovery ? { recovery_probe: true } : {}) });
         let upstream;
         try {
-          upstream = await sendUpstream(upstreamProvider, path, req, body, attempt.key, timeoutMs, controller.signal, agents);
+          upstream = await sendUpstream(upstreamProvider, path, req, body, attempt.key, timeoutMs, controller.signal, agentsFor(upstreamProvider));
         } catch (error) {
           if (controller.signal.aborted) return;
           queue.fail(attempt);
@@ -414,7 +422,9 @@ export function createGateway({ keys, upstreamOrigin = 'https://open.bigmodel.cn
       if (!res.headersSent || res.writableEnded) res.removeListener('close', cancel);
     }
   });
-  server.once('close', () => { agents.http.destroy(); agents.https.destroy(); });
+  server.once('close', () => {
+    for (const pool of [agents, ...providerAgents.values()]) { pool.http.destroy(); pool.https.destroy(); }
+  });
   return server;
 }
 
